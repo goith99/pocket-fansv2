@@ -2,19 +2,20 @@
 // target/idl/pocket_fans.json), and read helpers. Works in browser and Node.
 import { Buffer } from "buffer";
 import {
-  Connection, PublicKey, TransactionInstruction, AccountMeta,
+  Connection, PublicKey, TransactionInstruction, AccountMeta, SystemProgram,
 } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import {
   PROGRAM_ID, DEVUSDC_MINT, WSOL_MINT, TOKEN_PROGRAM, SYSTEM_PROGRAM,
   WHIRLPOOL, WHIRLPOOL_PROGRAM, WHIRLPOOL_VAULT_A, WHIRLPOOL_VAULT_B,
-  DISC, ACCT_DISC,
+  DISC, ACCT_DISC, MIN_SQRT_PRICE,
 } from "./constants";
 
 // --- little-endian encoders ---
 const u16 = (n: number) => { const b = Buffer.alloc(2); b.writeUInt16LE(n); return b; };
 const u32 = (n: number) => { const b = Buffer.alloc(4); b.writeUInt32LE(n); return b; };
 const u64 = (n: bigint) => { const b = Buffer.alloc(8); b.writeBigUInt64LE(n); return b; };
+const u128 = (n: bigint) => { const b = Buffer.alloc(16); b.writeBigUInt64LE(n & 0xffffffffffffffffn, 0); b.writeBigUInt64LE(n >> 64n, 8); return b; };
 const i64 = (n: bigint) => { const b = Buffer.alloc(8); b.writeBigInt64LE(n); return b; };
 const disc = (d: readonly number[]) => Buffer.from(d);
 const m = (pubkey: PublicKey, isSigner: boolean, isWritable: boolean): AccountMeta => ({ pubkey, isSigner, isWritable });
@@ -217,6 +218,102 @@ export async function ticksForBToA(conn: Connection): Promise<{ ta0: PublicKey; 
   const ta0Start = Math.floor(tickCurrent / span) * span;
   const ta0 = tickArrayPda(ta0Start);
   const taUp = tickArrayPda(ta0Start + span);
+  // Fall back to ta0 if the neighbor tick-array account doesn't exist (mirrors
+  // the proven live_flow.cjs pattern) — a tiny swap never crosses into it anyway.
+  const taUpOk = !!(await conn.getAccountInfo(taUp));
   const whirlpoolOracle = PublicKey.findProgramAddressSync([Buffer.from("oracle"), WHIRLPOOL.toBuffer()], WHIRLPOOL_PROGRAM)[0];
-  return { ta0, ta1: taUp, ta2: ta0, whirlpoolOracle }; // verified real b_to_a pattern: [ta0, next-up, ta0]
+  return { ta0, ta1: taUpOk ? taUp : ta0, ta2: ta0, whirlpoolOracle }; // verified real b_to_a pattern: [ta0, next-up, ta0]
+}
+
+// --- devUSDC faucet: wrap SOL -> Orca swap A(wSOL)->B(devUSDC) ---
+// There is no public devUSDC faucet — this mint only exists paired with the
+// devnet whirlpool this program swaps against. Getting some means doing the
+// same SOL->USDC swap `live_flow.cjs` does, just from the browser instead.
+// Mirrors the on-chain `read_whirlpool_sqrt_price` / `compute_min_out` math in
+// programs/pocket_fans/src/instructions/execute_rule.rs, but for the opposite
+// direction (A->B instead of B->A).
+
+const SYNC_NATIVE_DISC = Buffer.from([17]); // SPL Token `SyncNative` instruction tag (single byte, no args)
+const ORCA_SWAP_DISC = Buffer.from([248, 198, 158, 145, 225, 117, 135, 200]); // sha256("global:swap")[0..8]
+
+export function ixSyncNative(ownerWsolAta: PublicKey): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: TOKEN_PROGRAM,
+    keys: [m(ownerWsolAta, false, true)],
+    data: SYNC_NATIVE_DISC,
+  });
+}
+
+export function ixWrapSol(owner: PublicKey, ownerWsolAta: PublicKey, lamports: bigint): TransactionInstruction {
+  return SystemProgram.transfer({ fromPubkey: owner, toPubkey: ownerWsolAta, lamports });
+}
+
+// Live pool tick arrays for the A->B (SOL->USDC) direction — opposite neighbor
+// from ticksForBToA, matching the pattern proven in live_flow.cjs Stage A.
+export async function ticksForAToB(conn: Connection): Promise<{ ta0: PublicKey; ta1: PublicKey; ta2: PublicKey; whirlpoolOracle: PublicKey }> {
+  const info = await conn.getAccountInfo(WHIRLPOOL);
+  if (!info) throw new Error("whirlpool account not found");
+  const data = Buffer.from(info.data);
+  const tickSpacing = data.readUInt16LE(41);
+  const tickCurrent = data.readInt32LE(81);
+  const span = tickSpacing * TICK_ARRAY_SIZE;
+  const ta0Start = Math.floor(tickCurrent / span) * span;
+  const ta0 = tickArrayPda(ta0Start);
+  const taDown = tickArrayPda(ta0Start - span);
+  // Same existence fallback as ticksForBToA / live_flow.cjs.
+  const taDownOk = !!(await conn.getAccountInfo(taDown));
+  const whirlpoolOracle = PublicKey.findProgramAddressSync([Buffer.from("oracle"), WHIRLPOOL.toBuffer()], WHIRLPOOL_PROGRAM)[0];
+  return { ta0, ta1: taDownOk ? taDown : ta0, ta2: ta0, whirlpoolOracle };
+}
+
+// Reads the pool's live sqrt_price and estimates devUSDC out for a given SOL
+// (raw lamports) input — for display only (e.g. "≈ $2.74"); the actual min_out
+// sent on-chain is computed the same way with slippage applied.
+export async function estimateUsdcOut(conn: Connection, lamportsIn: bigint, slippageBps = 3000): Promise<bigint> {
+  const info = await conn.getAccountInfo(WHIRLPOOL);
+  if (!info) throw new Error("whirlpool account not found");
+  const sqrtPrice = Buffer.from(info.data).readBigUInt64LE(65) | (Buffer.from(info.data).readBigUInt64LE(73) << 64n);
+  const Q64 = 1n << 64n;
+  // price (raw B per raw A) = (sqrt_price / 2^64)^2 -> expected_B = amount_A * sqrt_price^2 / 2^128
+  const t = (lamportsIn * sqrtPrice) / Q64;
+  const expected = (t * sqrtPrice) / Q64;
+  return (expected * BigInt(10_000 - slippageBps)) / 10_000n;
+}
+
+// Wrap `lamportsIn` SOL and swap it to devUSDC via a real Orca CPI (A->B,
+// a_to_b=true). Generous default slippage (30%) since this is a devnet
+// convenience faucet, not a real-value trade — protects against a stale-price
+// revert without needing the caller to tune it. Returns the instructions to
+// bundle into one transaction alongside any needed ATA-creation instructions.
+export function ixSwapSolToUsdc(args: {
+  owner: PublicKey; ownerWsolAta: PublicKey; ownerUsdcAta: PublicKey;
+  lamportsIn: bigint; minUsdcOut: bigint;
+  tickArray0: PublicKey; tickArray1: PublicKey; tickArray2: PublicKey; whirlpoolOracle: PublicKey;
+}): TransactionInstruction {
+  const sqrtPriceLimit = MIN_SQRT_PRICE; // a_to_b pushes price down; MIN = no artificial floor beyond pool's own bound
+  const data = Buffer.concat([
+    ORCA_SWAP_DISC,
+    u64(args.lamportsIn),
+    u64(args.minUsdcOut),
+    u128(sqrtPriceLimit),
+    Buffer.from([1]), // amount_specified_is_input = true
+    Buffer.from([1]), // a_to_b = true (wSOL -> devUSDC)
+  ]);
+  return new TransactionInstruction({
+    programId: WHIRLPOOL_PROGRAM,
+    keys: [
+      m(TOKEN_PROGRAM, false, false),
+      m(args.owner, true, false),
+      m(WHIRLPOOL, false, true),
+      m(args.ownerWsolAta, false, true),   // token_owner_account_a
+      m(WHIRLPOOL_VAULT_A, false, true),
+      m(args.ownerUsdcAta, false, true),   // token_owner_account_b
+      m(WHIRLPOOL_VAULT_B, false, true),
+      m(args.tickArray0, false, true),
+      m(args.tickArray1, false, true),
+      m(args.tickArray2, false, true),
+      m(args.whirlpoolOracle, false, true),
+    ],
+    data,
+  });
 }

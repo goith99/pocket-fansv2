@@ -36,8 +36,9 @@ export const ACCT_DISC = {
   UserVault: [23, 76, 96, 159, 210, 10, 5, 22],
 } as const;
 
-// Whirlpool swap constants (USDC->SOL = B->A: a_to_b=false, upper price bound).
-export const MAX_SQRT_PRICE = 79226673515401279992447579055n;
+// Whirlpool swap constants.
+export const MAX_SQRT_PRICE = 79226673515401279992447579055n; // upper bound, used for B->A (USDC->SOL, execute_rule)
+export const MIN_SQRT_PRICE = 4295048016n; // lower bound, used for A->B (SOL->USDC, devUSDC faucet swap)
 
 // This phase's rule defaults.
 export const DEFAULT_MAX_SLIPPAGE_BPS = 1500;

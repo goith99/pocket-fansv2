@@ -3,6 +3,7 @@ import { ChevronRight, Check, Trophy, Coins, PiggyBank } from "lucide-react";
 import Link from "next/link";
 import TeamFlag from "./TeamFlag";
 import RetryNotice from "./RetryNotice";
+import DevUsdcFaucetCard from "./DevUsdcFaucetCard";
 import type { RuleView } from "@/lib/pf";
 
 const WHEN = [
@@ -74,6 +75,7 @@ function SavedCard({ value, celebrate }: { value: string; celebrate: boolean }) 
 
 export default function HomeView({
   greetingName, balanceUsd, savedSol, selectedTeam, amount, onAmountChange, onOpenPicker, onCreate, creating, challenges, teamName, celebrate, loadError, onRetry,
+  solBalance, faucetSolAmount, onFaucetSolAmountChange, onGetDevUsdc, faucetBusy,
 }: {
   greetingName: string;
   balanceUsd: number | null;
@@ -89,6 +91,11 @@ export default function HomeView({
   celebrate: boolean;
   loadError?: boolean;
   onRetry?: () => void;
+  solBalance: number | null;
+  faucetSolAmount: string;
+  onFaucetSolAmountChange: (v: string) => void;
+  onGetDevUsdc: () => void;
+  faucetBusy: boolean;
 }) {
   const total = (Number(amount) * 3 || 0).toFixed(2);
   const canCreate = !!selectedTeam && Number(amount) > 0 && !creating;
@@ -118,6 +125,15 @@ export default function HomeView({
       </div>
 
       {loadError && onRetry && <RetryNotice onRetry={onRetry} />}
+
+      {/* devnet-only: no public devUSDC faucet, so offer the same swap live_flow.cjs does, from the browser */}
+      <DevUsdcFaucetCard
+        solAmount={faucetSolAmount}
+        onSolAmountChange={onFaucetSolAmountChange}
+        onGet={onGetDevUsdc}
+        busy={faucetBusy}
+        solBalance={solBalance}
+      />
 
       {/* create a challenge */}
       <div className="card p-4">

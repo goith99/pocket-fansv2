@@ -18,6 +18,7 @@ export default function UserDashboard() {
   const app = useFanApp();
   const [teamId, setTeamId] = useState<number | "">("");
   const [amount, setAmount] = useState("1.00");
+  const [faucetSolAmount, setFaucetSolAmount] = useState("0.1");
   const [pickerOpen, setPickerOpen] = useState(false);
   const [celebrate, setCelebrate] = useState(false);
   const prevSaved = useRef<number | null>(null);
@@ -57,6 +58,11 @@ export default function UserDashboard() {
         celebrate={celebrate}
         loadError={app.loadError}
         onRetry={app.refresh}
+        solBalance={app.sol}
+        faucetSolAmount={faucetSolAmount}
+        onFaucetSolAmountChange={setFaucetSolAmount}
+        onGetDevUsdc={() => void app.getDevUsdc(faucetSolAmount)}
+        faucetBusy={app.busy}
       />
       <TeamPickerSheet
         open={pickerOpen}

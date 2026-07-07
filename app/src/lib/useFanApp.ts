@@ -21,6 +21,7 @@ import {
 import {
   vaultPda, ata, ixInitializeVault, ixCreateRule, ixRevokeRule, ixWithdrawWsol,
   ixExecuteRuleSelfClaim, ticksForBToA, getUserVault, getUserRules, tokenUiBalance, RuleView,
+  ixWrapSol, ixSyncNative, ixSwapSolToUsdc, ticksForAToB, estimateUsdcOut,
 } from "@/lib/pf";
 import { TEAM_BY_ID } from "@/lib/flags";
 import { useTxFlow } from "@/components/TransactionFlow";
@@ -210,6 +211,43 @@ export function useFanApp() {
     return sig;
   }, [address, connection, refresh, run]);
 
+  // DEVNET FAUCET HELPER: there is no public devUSDC faucet — this mint only
+  // exists paired with the whirlpool this program swaps against. This wraps
+  // `solAmountStr` SOL and swaps it to devUSDC via the same real Orca CPI
+  // live_flow.cjs uses, just triggered from the browser and signed by the user.
+  const getDevUsdc = useCallback(async (solAmountStr: string) => {
+    if (!address) return null;
+    const owner = new PublicKey(address);
+    const lamportsIn = BigInt(Math.round(Number(solAmountStr) * 1e9));
+    const sig = await run("Getting devUSDC", async (onSent) => {
+      if (lamportsIn <= 0n) throw new Error("Enter an amount greater than 0");
+      const ixs: TransactionInstruction[] = [];
+      const ownerWsol = ata(WSOL_MINT, owner);
+      const ownerUsdc = ata(DEVUSDC_MINT, owner);
+      if (!(await connection.getAccountInfo(ownerWsol))) {
+        ixs.push(createAssociatedTokenAccountIdempotentInstruction(owner, ownerWsol, owner, WSOL_MINT));
+      }
+      if (!(await connection.getAccountInfo(ownerUsdc))) {
+        ixs.push(createAssociatedTokenAccountIdempotentInstruction(owner, ownerUsdc, owner, DEVUSDC_MINT));
+      }
+      // wrap: transfer lamports into the wSOL ATA, then sync_native so the SPL
+      // balance reflects it (wSOL is "real" SOL sitting in a token account).
+      ixs.push(ixWrapSol(owner, ownerWsol, lamportsIn));
+      ixs.push(ixSyncNative(ownerWsol));
+
+      const { ta0, ta1, ta2, whirlpoolOracle } = await ticksForAToB(connection);
+      const minUsdcOut = await estimateUsdcOut(connection, lamportsIn); // 30% slippage floor — devnet convenience only
+      ixs.push(ixSwapSolToUsdc({
+        owner, ownerWsolAta: ownerWsol, ownerUsdcAta: ownerUsdc,
+        lamportsIn, minUsdcOut,
+        tickArray0: ta0, tickArray1: ta1, tickArray2: ta2, whirlpoolOracle,
+      }));
+      return submit(ixs, onSent);
+    });
+    if (sig) await refresh();
+    return sig;
+  }, [address, connection, refresh, run]);
+
   // resolve id → name: prefer the live snapshot, fall back to the static
   // ParticipantId registry so finished-fixture teams still resolve (never "Team 1634").
   const teamName = useCallback((id: number) => teams.find((t) => t.id === id)?.name ?? TEAM_BY_ID[id] ?? `Team ${id}`, [teams]);
@@ -218,6 +256,6 @@ export function useFanApp() {
     ready, authenticated, login, logout, user, address,
     sol, usdc, savedSol, teams, challenges, teamName,
     txState, resetTx, busy, refresh, loadError,
-    createChallenge, cancelChallenge, withdrawSavings, claimChallenge,
+    createChallenge, cancelChallenge, withdrawSavings, claimChallenge, getDevUsdc,
   };
 }
