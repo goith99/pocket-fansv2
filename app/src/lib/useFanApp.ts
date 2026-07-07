@@ -1,0 +1,223 @@
+"use client";
+// Shared client hook: wallet + balances + challenges + the create/cancel/withdraw/
+// claim actions, all wired to the transaction-flow feedback. This is the ONLY
+// place the on-chain plumbing lives; screens stay presentational. The
+// instruction builders, PDAs and account logic are untouched (imported from
+// lib/pf) — this is the same logic the previous dashboard used, just
+// centralised and given consumer labels.
+//
+// SELF-CLAIM MODEL: there is no more admin/oracle execute step. `claimChallenge`
+// below is what used to live only in /admin's `execute` handler — now any
+// challenge owner calls it themselves, once their match's match_end_ts has
+// passed. See programs/pocket_fans/src/instructions/execute_rule.rs.
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { usePrivy, useSolanaWallets } from "@privy-io/react-auth";
+import { Connection, PublicKey, Transaction, TransactionInstruction } from "@solana/web3.js";
+import { createAssociatedTokenAccountIdempotentInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token";
+import {
+  DEVUSDC_MINT, WSOL_MINT, DEVUSDC_DECIMALS, DEFAULT_MAX_EXECUTIONS, DEFAULT_MAX_SLIPPAGE_BPS,
+  MATCH_END_BUFFER_SECS,
+} from "@/lib/constants";
+import {
+  vaultPda, ata, ixInitializeVault, ixCreateRule, ixRevokeRule, ixWithdrawWsol,
+  ixExecuteRuleSelfClaim, ticksForBToA, getUserVault, getUserRules, tokenUiBalance, RuleView,
+} from "@/lib/pf";
+import { TEAM_BY_ID } from "@/lib/flags";
+import { useTxFlow } from "@/components/TransactionFlow";
+
+export interface Team { id: number; name: string }
+interface Fixture { fixtureId: number; startTime: number; participant1: { id: number }; participant2: { id: number }; status: "upcoming" | "live" | "finished" }
+
+export function useFanApp() {
+  const { ready, authenticated, login, logout, user } = usePrivy();
+  const { wallets } = useSolanaWallets();
+  const wallet = wallets[0];
+  const address = wallet?.address;
+  const { state: txState, run, reset: resetTx } = useTxFlow();
+  const busy = txState.phase === "awaiting" || txState.phase === "confirming";
+
+  const connection = useMemo(() => {
+    const origin = typeof window !== "undefined" ? window.location.origin : "http://localhost:3055";
+    return new Connection(`${origin}/api/rpc`, "confirmed");
+  }, []);
+
+  const [teams, setTeams] = useState<Team[]>([]);
+  const [fixtures, setFixtures] = useState<Fixture[]>([]);
+  const [sol, setSol] = useState<number | null>(null);
+  const [usdc, setUsdc] = useState<number | null>(null);
+  const [savedSol, setSavedSol] = useState<number | null>(null);
+  const [challenges, setChallenges] = useState<RuleView[]>([]);
+  const [loadError, setLoadError] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/schedule").then((r) => r.json()).then((d) => {
+      if (d.teams) setTeams(d.teams);
+      if (d.fixtures) setFixtures(d.fixtures);
+    }).catch(() => {});
+  }, []);
+
+  // Reads all degrade gracefully: a transient RPC failure (e.g. a Helius 500 or
+  // rate-limit blip) sets loadError so the UI can show a small inline retry,
+  // never an unhandled rejection / dev-overlay crash.
+  const refresh = useCallback(async () => {
+    if (!address) return;
+    try {
+      const owner = new PublicKey(address);
+      const [lam, u, v] = await Promise.all([
+        connection.getBalance(owner),
+        tokenUiBalance(connection, DEVUSDC_MINT, owner),
+        tokenUiBalance(connection, WSOL_MINT, vaultPda(owner)),
+      ]);
+      const uv = await getUserVault(connection, owner);
+      const rules = await getUserRules(connection, owner, uv.totalRules);
+      setSol(lam / 1e9);
+      setUsdc(u?.ui ?? 0);
+      setSavedSol(v?.ui ?? 0);
+      setChallenges(rules);
+      setLoadError(false);
+    } catch {
+      setLoadError(true);
+    }
+  }, [address, connection]);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  // gentle background refresh so winnings landing on-chain surface (and the
+  // celebration fires) without the fan having to reload.
+  useEffect(() => {
+    if (!address) return;
+    const id = setInterval(() => { void refresh(); }, 20000);
+    return () => clearInterval(id);
+  }, [address, refresh]);
+
+  async function pollConfirm(sig: string) {
+    for (let i = 0; i < 40; i++) {
+      const st = (await connection.getSignatureStatuses([sig])).value[0];
+      if (st?.err) throw new Error(`tx failed: ${JSON.stringify(st.err)}`);
+      if (st?.confirmationStatus === "confirmed" || st?.confirmationStatus === "finalized") return;
+      await new Promise((r) => setTimeout(r, 1200));
+    }
+    throw new Error("confirmation timed out");
+  }
+  async function submit(ixs: TransactionInstruction[], onSent: (sig: string) => void): Promise<string> {
+    if (!wallet) throw new Error("no wallet");
+    const owner = new PublicKey(wallet.address);
+    const tx = new Transaction().add(...ixs);
+    tx.feePayer = owner;
+    tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
+    // Explicit human action already occurred (button tap). Triggers the wallet
+    // signing UI — no auto-approval anywhere.
+    const signed = await (wallet as any).signTransaction(tx);
+    const sig = await connection.sendRawTransaction(signed.serialize());
+    onSent(sig);
+    await pollConfirm(sig);
+    return sig;
+  }
+
+  // Next fixture (by kickoff time) involving this team that hasn't finished
+  // yet. This is what fixes match_id/match_end_ts on the rule — the team
+  // picker itself only ever chose a team, not a specific fixture, so we resolve
+  // that here rather than adding a second picker to the UI.
+  function nextFixtureForTeam(teamId: number): Fixture | null {
+    const now = Date.now();
+    const candidates = fixtures
+      .filter((f) => (f.participant1.id === teamId || f.participant2.id === teamId) && f.status !== "finished")
+      .sort((a, b) => a.startTime - b.startTime);
+    return candidates.find((f) => f.startTime >= now) ?? candidates[0] ?? null;
+  }
+
+  // create a challenge (program: create_rule). Also ensures the owner's + vault's
+  // token accounts exist first, so it can later self-claim without any manual
+  // setup. match_id + match_end_ts are fixed here from the team's next fixture.
+  const createChallenge = useCallback(async (teamId: number, amountStr: string) => {
+    if (!address) return null;
+    const owner = new PublicKey(address);
+    const amountUsdc = BigInt(Math.round(Number(amountStr) * 10 ** DEVUSDC_DECIMALS));
+    const sig = await run("Setting up your challenge", async (onSent) => {
+      if (amountUsdc <= 0n) throw new Error("Enter an amount greater than 0");
+      const fixture = nextFixtureForTeam(teamId);
+      if (!fixture) throw new Error("No scheduled match found for this team yet");
+      const matchId = BigInt(fixture.fixtureId);
+      const matchEndTs = BigInt(Math.floor(fixture.startTime / 1000) + MATCH_END_BUFFER_SECS);
+
+      const ixs: TransactionInstruction[] = [];
+      const uv = await getUserVault(connection, owner);
+      if (!uv.exists) ixs.push(ixInitializeVault(owner));
+      const usdcAta = getAssociatedTokenAddressSync(DEVUSDC_MINT, owner);
+      if (!(await connection.getAccountInfo(usdcAta))) {
+        ixs.push(createAssociatedTokenAccountIdempotentInstruction(owner, usdcAta, owner, DEVUSDC_MINT));
+      }
+      const vault = vaultPda(owner);
+      // Pre-create the vault's token accounts here (this used to be the admin's
+      // job, done lazily in build-execute — now there's no admin step, so it
+      // must happen at creation time instead).
+      for (const mint of [DEVUSDC_MINT, WSOL_MINT]) {
+        const vaultAta = ata(mint, vault);
+        if (!(await connection.getAccountInfo(vaultAta))) {
+          ixs.push(createAssociatedTokenAccountIdempotentInstruction(owner, vaultAta, vault, mint));
+        }
+      }
+      ixs.push(ixCreateRule({
+        owner, vaultTotalRules: uv.totalRules, teamId,
+        amountUsdc, maxSlippageBps: DEFAULT_MAX_SLIPPAGE_BPS, maxExecutions: DEFAULT_MAX_EXECUTIONS,
+        matchId, matchEndTs,
+      }));
+      return submit(ixs, onSent);
+    });
+    if (sig) await refresh();
+    return sig;
+  }, [address, connection, fixtures, refresh, run]);
+
+  const cancelChallenge = useCallback(async (ruleId: number) => {
+    if (!address) return null;
+    const owner = new PublicKey(address);
+    const sig = await run("Cancelling challenge", (onSent) => submit([ixRevokeRule(owner, ruleId)], onSent));
+    if (sig) await refresh();
+    return sig;
+  }, [address, refresh, run]);
+
+  // SELF-CLAIM: the owner executes their own rule directly, once its
+  // match_end_ts has passed — no admin, no oracle. Replaces the old flow where
+  // an admin wallet built + signed this from /admin.
+  const claimChallenge = useCallback(async (ruleId: number) => {
+    if (!address) return null;
+    const owner = new PublicKey(address);
+    const sig = await run("Claiming your savings", async (onSent) => {
+      const { ta0, ta1, ta2, whirlpoolOracle } = await ticksForBToA(connection);
+      const ix = ixExecuteRuleSelfClaim({ owner, ruleId, tickArray0: ta0, tickArray1: ta1, tickArray2: ta2, whirlpoolOracle });
+      return submit([ix], onSent);
+    });
+    if (sig) await refresh();
+    return sig;
+  }, [address, connection, refresh, run]);
+
+  const withdrawSavings = useCallback(async () => {
+    if (!address) return null;
+    const owner = new PublicKey(address);
+    const vault = vaultPda(owner);
+    const sig = await run("Withdrawing your savings", async (onSent) => {
+      const bal = await tokenUiBalance(connection, WSOL_MINT, vault);
+      if (!bal || bal.raw <= 0n) throw new Error("No savings to withdraw yet");
+      const ixs: TransactionInstruction[] = [];
+      const ownerWsol = ata(WSOL_MINT, owner);
+      if (!(await connection.getAccountInfo(ownerWsol))) {
+        ixs.push(createAssociatedTokenAccountIdempotentInstruction(owner, ownerWsol, owner, WSOL_MINT));
+      }
+      ixs.push(ixWithdrawWsol(owner, bal.raw));
+      return submit(ixs, onSent);
+    });
+    if (sig) await refresh();
+    return sig;
+  }, [address, connection, refresh, run]);
+
+  // resolve id → name: prefer the live snapshot, fall back to the static
+  // ParticipantId registry so finished-fixture teams still resolve (never "Team 1634").
+  const teamName = useCallback((id: number) => teams.find((t) => t.id === id)?.name ?? TEAM_BY_ID[id] ?? `Team ${id}`, [teams]);
+
+  return {
+    ready, authenticated, login, logout, user, address,
+    sol, usdc, savedSol, teams, challenges, teamName,
+    txState, resetTx, busy, refresh, loadError,
+    createChallenge, cancelChallenge, withdrawSavings, claimChallenge,
+  };
+}

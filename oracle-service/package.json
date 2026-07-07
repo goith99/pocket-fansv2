@@ -1,0 +1,13 @@
+{
+  "name": "pocket-fans-oracle-service",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Backend oracle for Pocket Fans: polls TxLINE for finished matches relevant to active on-chain TeamWin rules and (in live mode) submits execute_rule. DRY-RUN only for now — no signer wired.",
+  "type": "commonjs",
+  "scripts": {
+    "dryrun": "node src/dryrun.cjs"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.98.0"
+  }
+}

@@ -1,0 +1,122 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Pocket Fans — light consumer sports-fintech theme.
+     green  = brand / pitch structure
+     blue   = the CTA ("tap this")
+     gold   = the win / celebration moment
+     red    = live · green-check = finished
+   Body/UI is Inter at comfortable sizes; mono is reserved for scorelines. */
+
+:root {
+  color-scheme: light;
+  --bg: #f3f6f1;
+  --card: #ffffff;
+  --line: #e5ebe1;
+  --ink: #12211a;
+  --muted: #5b6b62;
+  --faint: #8a968e;
+  --green: #0e8a46;
+  --green-deep: #0a6b37;
+  --green-tint: #e4f3e9;
+  --accent: #2f6bff;
+  --accent-dark: #1e52d6;
+  --gold: #ffb020;
+  --live: #e23b3b;
+}
+
+body {
+  @apply bg-bg text-ink;
+  font-family: var(--font-body), system-ui, sans-serif;
+  font-size: 16px;
+  min-height: 100vh;
+}
+
+/* Full-bleed landing sections use `w-screen` breakouts; clip the sliver of
+   horizontal overflow that w-screen creates when a scrollbar is present. */
+html, body {
+  overflow-x: clip;
+}
+
+@layer components {
+  .card {
+    @apply rounded-2xl border border-line bg-card shadow-soft;
+  }
+  /* alias used by the technical /admin screen */
+  .panel {
+    @apply rounded-2xl border border-line bg-card p-4 shadow-soft;
+  }
+
+  /* ---- buttons (min 48px, thumb-friendly) ---- */
+  .btn-primary {
+    @apply inline-flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl px-5
+           text-[15px] font-semibold text-white transition active:scale-[0.99]
+           disabled:cursor-not-allowed disabled:opacity-40;
+    background: var(--accent);
+    box-shadow: 0 8px 20px -8px rgba(47, 107, 255, 0.45);
+  }
+  .btn-primary:hover:not(:disabled) { background: var(--accent-dark); }
+  .btn-ghost {
+    @apply inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl border border-line bg-card
+           px-4 font-medium text-ink transition hover:border-accent hover:text-accent
+           disabled:cursor-not-allowed disabled:opacity-40;
+  }
+
+  /* ---- form ---- */
+  .input {
+    @apply min-h-[52px] w-full rounded-xl border border-line bg-card px-4 text-base text-ink outline-none transition
+           placeholder:text-faint;
+  }
+  .input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(47, 107, 255, 0.12); }
+  .label { @apply text-[11px] font-semibold uppercase tracking-[0.12em] text-faint; }
+
+  /* ---- status pills (schedule, picker, admin) ---- */
+  .pill {
+    @apply inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 py-1
+           text-[11px] font-bold uppercase tracking-[0.06em];
+    border-color: transparent;
+  }
+  .pill-upcoming { background: #eef1ec; color: var(--muted); }
+  .pill-live { background: #fdecec; color: var(--live); }
+  .pill-finished { background: var(--green-tint); color: var(--green-deep); }
+  .live-dot { @apply inline-block h-2 w-2 rounded-full animate-pulse-live; background: var(--live); }
+
+  /* ---- trigger / action chips (create-challenge) ---- */
+  .chip {
+    @apply relative flex min-h-[46px] items-center justify-center gap-1.5 rounded-xl border px-3 py-2
+           text-center font-display text-sm font-semibold uppercase tracking-wide transition;
+  }
+  .chip-idle { border-color: var(--line); color: var(--muted); background: var(--card); }
+  .chip-active { border-color: var(--green); color: var(--green-deep); background: var(--green-tint); }
+  .chip-soon {
+    border-style: dashed;
+    border-color: var(--line);
+    color: var(--faint);
+    opacity: 0.6;
+    cursor: default;
+  }
+  .chip-soon-tag { @apply ml-1 rounded-full bg-black/[0.04] px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-[0.1em] text-faint; }
+
+  .spinner { @apply inline-block h-[0.9em] w-[0.9em] animate-spin rounded-full border-2 border-current; border-top-color: transparent; }
+}
+
+/* celebration confetti (used via inline style on the Saved card) */
+@keyframes confetti-fall {
+  0% { transform: translateY(-10px) rotate(0); opacity: 1; }
+  100% { transform: translateY(120px) rotate(320deg); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-pulse-live, .animate-pop-in, .animate-sheet-up, .spinner { animation: none !important; }
+}
+
+/* wallet-adapter button (only on /admin): match the CTA */
+.wallet-adapter-button-trigger {
+  background: var(--accent) !important;
+  border-radius: 12px !important;
+  height: 44px !important;
+  font-family: var(--font-body) !important;
+  font-size: 0.85rem !important;
+}
+.wallet-adapter-button-trigger:hover { background: var(--accent-dark) !important; }

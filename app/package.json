@@ -1,0 +1,38 @@
+{
+  "name": "pocket-fans-app",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 3055",
+    "build": "next build",
+    "start": "next start -p 3055",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@privy-io/react-auth": "^2.13.0",
+    "@solana/spl-token": "^0.4.9",
+    "@solana/wallet-adapter-base": "^0.9.23",
+    "@solana/wallet-adapter-react": "^0.15.35",
+    "@solana/wallet-adapter-react-ui": "^0.9.35",
+    "@solana/wallet-adapter-wallets": "^0.19.32",
+    "@solana/web3.js": "^1.98.0",
+    "@supabase/supabase-js": "^2.110.0",
+    "bs58": "^6.0.0",
+    "buffer": "^6.0.3",
+    "flag-icons": "^7.5.0",
+    "lucide-react": "^1.23.0",
+    "next": "14.2.15",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.47",
+    "puppeteer": "^25.3.0",
+    "tailwindcss": "^3.4.14",
+    "typescript": "^5"
+  }
+}
