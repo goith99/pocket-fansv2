@@ -2,12 +2,14 @@
   "name": "pocket-fans-oracle-service",
   "version": "0.1.0",
   "private": true,
-  "description": "Backend oracle for Pocket Fans: polls TxLINE for finished matches relevant to active on-chain TeamWin rules and (in live mode) submits execute_rule. DRY-RUN only for now — no signer wired.",
+  "description": "Background services for Pocket Fans. poller.cjs is the long-running Railway daemon that keeps the Supabase fixtures_cache fresh from TxLINE — the Next.js app only ever reads that cache, never TxLINE directly. dryrun.cjs is a leftover v1 (oracle-model) tool, unused by the self-claim program.",
   "type": "commonjs",
   "scripts": {
+    "poller": "node src/poller.cjs",
     "dryrun": "node src/dryrun.cjs"
   },
   "dependencies": {
-    "@solana/web3.js": "^1.98.0"
+    "@solana/web3.js": "^1.98.0",
+    "@supabase/supabase-js": "^2.110.0"
   }
 }

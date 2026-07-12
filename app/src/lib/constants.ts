@@ -42,7 +42,10 @@ export const MIN_SQRT_PRICE = 4295048016n; // lower bound, used for A->B (SOL->U
 
 // This phase's rule defaults.
 export const DEFAULT_MAX_SLIPPAGE_BPS = 1500;
-export const DEFAULT_MAX_EXECUTIONS = 3;
+// FIXED at 1 (not a tunable "default"): each rule is pinned to exactly one
+// match (match_id + match_end_ts fixed at create_rule) — a single match only
+// ever finishes once, so it can only ever be legitimately claimed once.
+export const DEFAULT_MAX_EXECUTIONS = 1;
 
 // Browser talks to the same-origin RPC proxy (keeps the Helius key server-side).
 export const BROWSER_RPC = "/api/rpc";

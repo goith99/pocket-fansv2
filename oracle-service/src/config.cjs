@@ -46,6 +46,23 @@ const config = {
   // --- persistence / logging ---
   logFile: process.env.LOG_FILE || path.resolve(__dirname, '../logs/oracle.log'),
 
+  // --- Supabase (fixtures cache) ---
+  // Written by poller.cjs (this service, on Railway), read by the Next.js app
+  // (app/src/lib/serverSupabase.ts, on Vercel). Both sides use the SAME
+  // service-role key — this table is never exposed to the browser.
+  supabaseUrl: process.env.SUPABASE_URL,
+  supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
+
+  // --- poller intervals (ms) ---
+  // How often to re-pull the forward fixture list (catches newly announced
+  // fixtures / schedule changes). Cheap call, no need to run it often.
+  pollForwardMs: num('POLL_FORWARD_MS', 5 * 60_000), // 5 min
+  // How often to check in-progress fixtures (kickoff has passed, not yet
+  // finished) for a final-whistle event. This is the one that matters for UX
+  // latency — lower = fresher "finished" status, at the cost of more TxLINE
+  // calls. 20s keeps well within the free SL1 tier's lack of rate limit.
+  pollLiveMs: num('POLL_LIVE_MS', 20_000),
+
   // Hard safety: this build is DRY-RUN only. No signer is ever loaded.
   dryRun: true,
 };

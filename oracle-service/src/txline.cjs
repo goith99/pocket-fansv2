@@ -9,7 +9,14 @@ let jwt = null; // { token, exp }
 // events) and the endpoint occasionally hangs/rate-limits; without a bound, a
 // single slow fixture can stall the whole admin request (and on Vercel hit the
 // function time limit), silently dropping that fixture. See getFinishedResult.
-const FETCH_TIMEOUT_MS = 6000;
+// Measured directly against a real knockout fixture's historical payload
+// (625KB, 1000+ events): took 10.27s end-to-end. 6000ms aborted every single
+// attempt before the body was even fully received — the fetch never got a
+// chance to see the `game_finalised` event, so getFinishedResult always
+// returned null (caught by the caller's `.catch(() => null)`) and the fixture
+// stayed permanently stuck as "live". 15000ms gives ~50% headroom over the
+// worst case measured so far.
+const FETCH_TIMEOUT_MS = 15000;
 
 // fetch() with an AbortController deadline. Returns { res, done }: the caller
 // MUST call done() once it has finished consuming the body, so the timeout also
