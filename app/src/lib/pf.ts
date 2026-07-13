@@ -8,7 +8,7 @@ import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import {
   PROGRAM_ID, DEVUSDC_MINT, WSOL_MINT, TOKEN_PROGRAM, SYSTEM_PROGRAM,
   WHIRLPOOL, WHIRLPOOL_PROGRAM, WHIRLPOOL_VAULT_A, WHIRLPOOL_VAULT_B,
-  DISC, ACCT_DISC, MIN_SQRT_PRICE,
+  DISC, ACCT_DISC, MIN_SQRT_PRICE, TXORACLE_PROGRAM,
 } from "./constants";
 
 // --- little-endian encoders ---
@@ -17,8 +17,39 @@ const u32 = (n: number) => { const b = Buffer.alloc(4); b.writeUInt32LE(n); retu
 const u64 = (n: bigint) => { const b = Buffer.alloc(8); b.writeBigUInt64LE(n); return b; };
 const u128 = (n: bigint) => { const b = Buffer.alloc(16); b.writeBigUInt64LE(n & 0xffffffffffffffffn, 0); b.writeBigUInt64LE(n >> 64n, 8); return b; };
 const i64 = (n: bigint) => { const b = Buffer.alloc(8); b.writeBigInt64LE(n); return b; };
+const i32 = (n: number) => { const b = Buffer.alloc(4); b.writeInt32LE(n); return b; };
+const u8 = (n: number) => Buffer.from([n]);
+const bool = (v: boolean) => Buffer.from([v ? 1 : 0]);
+/** Borsh fixed [u8; 32]. Accepts a hex string, number[], or raw bytes. */
+const bytes32 = (v: Uint8Array | number[] | string): Buffer => {
+  const b = typeof v === "string"
+    ? Buffer.from(v.replace(/^0x/, ""), "hex")
+    : Buffer.from(v as Uint8Array);
+  if (b.length !== 32) throw new Error(`expected 32 bytes, got ${b.length}`);
+  return b;
+};
+/** Borsh Vec<T> = u32 LE length prefix + concatenated items. */
+const vec = <T,>(items: readonly T[], enc: (t: T) => Buffer) =>
+  Buffer.concat([u32(items.length), ...items.map(enc)]);
 const disc = (d: readonly number[]) => Buffer.from(d);
 const m = (pubkey: PublicKey, isSigner: boolean, isWritable: boolean): AccountMeta => ({ pubkey, isSigner, isWritable });
+
+// --- trigger encoding (TriggerType, a borsh-tagged enum) ---
+// Tags come from the variant ORDER in programs/pocket_fans/src/state.rs:
+//   0 = TeamWin { team_id }
+//   1 = GoalScored { team_id, stat_key, threshold }
+export type RuleTrigger =
+  | { kind: "TeamWin"; teamId: number }
+  | { kind: "GoalScored"; teamId: number; statKey: number; threshold: number };
+
+export function encodeTrigger(t: RuleTrigger): Buffer {
+  switch (t.kind) {
+    case "TeamWin":
+      return Buffer.concat([u8(0), u32(t.teamId)]);
+    case "GoalScored":
+      return Buffer.concat([u8(1), u32(t.teamId), u32(t.statKey), u8(t.threshold)]);
+  }
+}
 
 // --- PDAs ---
 export const vaultPda = (owner: PublicKey) =>
@@ -36,18 +67,25 @@ export function ixInitializeVault(owner: PublicKey): TransactionInstruction {
   });
 }
 
-// create_rule: TeamWin{team_id} + SwapAndSave{amount_usdc, wSOL, slippage} +
-// SELF-CLAIM fields matchId (TxLINE fixture id) + matchEndTs (unix seconds,
-// the point after which execute_rule becomes callable). rule PDA seed uses the
+// create_rule: <trigger> + SwapAndSave{amount_usdc, wSOL, slippage} + matchId
+// (TxLINE fixture id) + matchEndTs (unix seconds). rule PDA seed uses the
 // CURRENT vault.total_rules, which the caller passes in.
+//
+// `trigger` decides which EXECUTION path the rule is later claimed through, and
+// the two are not interchangeable:
+//   TeamWin    -> execute_rule          (owner signs, time-guarded on matchEndTs)
+//   GoalScored -> execute_rule_verified (anyone submits, gated by a Txoracle proof)
+// matchEndTs is still required for both: it is a stored field on Rule, and for a
+// GoalScored rule it is simply unused by the execution path (that rule fires
+// mid-match on the proof, not on the clock).
 export function ixCreateRule(args: {
-  owner: PublicKey; vaultTotalRules: number; teamId: number;
+  owner: PublicKey; vaultTotalRules: number; trigger: RuleTrigger;
   amountUsdc: bigint; maxSlippageBps: number; maxExecutions: number;
   matchId: bigint; matchEndTs: bigint;
 }): TransactionInstruction {
   const vault = vaultPda(args.owner);
   const rule = rulePda(vault, args.vaultTotalRules);
-  const trigger = Buffer.concat([Buffer.from([0]), u32(args.teamId)]);               // TeamWin variant 0
+  const trigger = encodeTrigger(args.trigger);
   const action = Buffer.concat([Buffer.from([0]), u64(args.amountUsdc), WSOL_MINT.toBuffer(), u16(args.maxSlippageBps)]); // SwapAndSave variant 0
   const data = Buffer.concat([
     disc(DISC.create_rule), trigger, action, u16(args.maxExecutions),
@@ -128,48 +166,196 @@ export function ixExecuteRuleSelfClaim(args: {
   });
 }
 
+// ===========================================================================
+// execute_rule_verified — GoalScored trigger (permissionless keeper + oracle)
+// ===========================================================================
+// PERMISSIONLESS: `caller` is the only signer and is NOT trusted by the program
+// — it just pays the fee. A keeper bot normally submits this; the rule's owner
+// can also submit it themselves as a manual fallback. The gate is the Txoracle
+// validate_stat_v2 CPI verdict, nothing else.
+//
+// Borsh types below mirror programs/pocket_fans/src/instructions/txoracle.rs
+// EXACTLY — field order is the wire format and must not be reordered. Verified
+// against target/idl/pocket_fans.json (StatValidationInput).
+
+export interface ProofNode { hash: Uint8Array | number[] | string; isRightSibling: boolean }
+export interface ScoreStat { key: number; value: number; period: number }
+export interface StatLeaf { stat: ScoreStat; statProof: ProofNode[] }
+export interface ScoresUpdateStats { updateCount: number; minTimestamp: bigint; maxTimestamp: bigint }
+export interface ScoresBatchSummary {
+  fixtureId: bigint;
+  updateStats: ScoresUpdateStats;
+  eventsSubTreeRoot: Uint8Array | number[] | string;
+}
+/** The `payload` arg of execute_rule_verified. */
+export interface StatValidationInput {
+  ts: bigint;
+  fixtureSummary: ScoresBatchSummary;
+  fixtureProof: ProofNode[];
+  mainTreeProof: ProofNode[];
+  eventStatRoot: Uint8Array | number[] | string;
+  stats: StatLeaf[];
+}
+
+const encProofNode = (n: ProofNode) => Buffer.concat([bytes32(n.hash), bool(n.isRightSibling)]);
+const encScoreStat = (s: ScoreStat) => Buffer.concat([u32(s.key), i32(s.value), i32(s.period)]);
+const encStatLeaf = (l: StatLeaf) => Buffer.concat([encScoreStat(l.stat), vec(l.statProof, encProofNode)]);
+const encBatchSummary = (s: ScoresBatchSummary) => Buffer.concat([
+  i64(s.fixtureId),                       // fixture_id: i64 (NOT u64)
+  i32(s.updateStats.updateCount),         // update_stats.update_count: i32
+  i64(s.updateStats.minTimestamp),        // update_stats.min_timestamp: i64
+  i64(s.updateStats.maxTimestamp),        // update_stats.max_timestamp: i64
+  bytes32(s.eventsSubTreeRoot),           // events_sub_tree_root: [u8; 32]
+]);
+
+export function encodeStatValidationInput(p: StatValidationInput): Buffer {
+  return Buffer.concat([
+    i64(p.ts),
+    encBatchSummary(p.fixtureSummary),
+    vec(p.fixtureProof, encProofNode),
+    vec(p.mainTreeProof, encProofNode),
+    bytes32(p.eventStatRoot),
+    vec(p.stats, encStatLeaf),
+  ]);
+}
+
+// Txoracle's `daily_scores_roots` PDA: seeds ["daily_scores_roots", u16 LE
+// epochDay], owned by the Txoracle program. The epoch day is derived from the
+// batch's MIN timestamp, which TxLINE reports in MILLISECONDS — same derivation
+// the proven ShroudLine resolve path uses. Pass `minTimestamp` straight through
+// from the stat-validation payload; do NOT pre-convert it to seconds.
+export function dailyScoresRootsPda(minTimestampMs: bigint): PublicKey {
+  const epochDay = Number(minTimestampMs / 86_400_000n);
+  const dayLe = Buffer.alloc(2);
+  dayLe.writeUInt16LE(epochDay);
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("daily_scores_roots"), dayLe],
+    TXORACLE_PROGRAM,
+  )[0];
+}
+
+// Account order mirrors ExecuteRuleVerified in
+// programs/pocket_fans/src/instructions/execute_rule_verified.rs exactly (19
+// accounts). Note token_program is LAST (index 18), after the two oracle
+// accounts — it is NOT grouped with the token accounts.
+export function ixExecuteRuleVerified(args: {
+  caller: PublicKey;          // fee payer / signer — keeper bot OR the owner
+  vaultOwner: PublicKey;      // whose vault+rule this is (need not equal caller)
+  ruleId: number;
+  payload: StatValidationInput;
+  tickArray0: PublicKey; tickArray1: PublicKey; tickArray2: PublicKey;
+  whirlpoolOracle: PublicKey;
+  dailyScoresRoots?: PublicKey; // defaults to the PDA for payload's epoch day
+}): TransactionInstruction {
+  const vault = vaultPda(args.vaultOwner);
+  const rule = rulePda(vault, args.ruleId);
+  const dailyScoresRoots =
+    args.dailyScoresRoots ?? dailyScoresRootsPda(args.payload.fixtureSummary.updateStats.minTimestamp);
+
+  const data = Buffer.concat([
+    disc(DISC.execute_rule_verified),
+    u16(args.ruleId),
+    encodeStatValidationInput(args.payload),
+  ]);
+
+  return new TransactionInstruction({
+    programId: PROGRAM_ID,
+    keys: [
+      m(args.caller, true, true),                       //  0 caller (signer, untrusted)
+      m(vault, false, false),                           //  1 vault
+      m(rule, false, true),                             //  2 rule
+      m(DEVUSDC_MINT, false, false),                    //  3 usdc_mint
+      m(WSOL_MINT, false, false),                       //  4 wsol_mint
+      m(ata(DEVUSDC_MINT, args.vaultOwner), false, true), // 5 owner_usdc_ata (owner's, not caller's)
+      m(ata(DEVUSDC_MINT, vault), false, true),         //  6 vault_usdc_ata
+      m(ata(WSOL_MINT, vault), false, true),            //  7 vault_wsol_ata
+      m(WHIRLPOOL, false, true),                        //  8 whirlpool
+      m(WHIRLPOOL_VAULT_A, false, true),                //  9 whirlpool_token_vault_a
+      m(WHIRLPOOL_VAULT_B, false, true),                // 10 whirlpool_token_vault_b
+      m(args.tickArray0, false, true),                  // 11 tick_array_0
+      m(args.tickArray1, false, true),                  // 12 tick_array_1
+      m(args.tickArray2, false, true),                  // 13 tick_array_2
+      m(args.whirlpoolOracle, false, true),             // 14 whirlpool_oracle
+      m(WHIRLPOOL_PROGRAM, false, false),               // 15 whirlpool_program
+      m(dailyScoresRoots, false, false),                // 16 daily_scores_roots
+      m(TXORACLE_PROGRAM, false, false),                // 17 txoracle_program
+      m(TOKEN_PROGRAM, false, false),                   // 18 token_program
+    ],
+    data,
+  });
+}
+
 // --- decoders / reads ---
 export interface RuleView {
   pubkey: string; vault: string; ruleId: number; teamId: number | null;
   amountUsdc: string | null; maxSlippageBps: number | null;
   matchId: string; matchEndTs: number;
   maxExecutions: number; executionsDone: number; isActive: boolean;
+  /** "TeamWin" (self-claim) or "GoalScored" (keeper + oracle). */
+  triggerKind: "TeamWin" | "GoalScored";
+  /** GoalScored only — the proven stat and the value it must reach. */
+  statKey: number | null; threshold: number | null;
 }
 
-// Layout (self-claim model — see programs/pocket_fans/src/state.rs Rule):
-//   0..8    disc
-//   8..40   vault (32)
-//   40..42  rule_id (u16)
-//   42      trigger tag (u8)
-//   43..47  team_id (u32)                [TeamWin]
-//   47      action tag (u8)
-//   48..56  amount_usdc (u64)            [SwapAndSave]
-//   56..88  target_mint (32)
-//   88..90  max_slippage_bps (u16)
-//   90..98  match_id (u64)
-//   98..106 match_end_ts (i64)
-//   106..108 max_executions (u16)
-//   108..110 executions_done (u16)
-//   110     is_active (bool)
-//   111     bump (u8)
-//   112..136 reserved (24)
-// total = 136 bytes
+// Layout — see programs/pocket_fans/src/state.rs Rule.
+//
+// TriggerType is a BORSH-TAGGED ENUM = VARIABLE LENGTH, so every field after
+// `trigger_type` sits at a DIFFERENT offset per variant:
+//   TeamWin    { team_id }                      -> 1 + 4 = 5 bytes
+//   GoalScored { team_id, stat_key, threshold } -> 1 + 9 = 10 bytes
+//
+// DO NOT check for an exact byte length here. Anchor allocates every Rule at
+// the MAX variant size, so since GoalScored was added, BOTH variants allocate
+// 141 bytes (a TeamWin rule serializes to 136 and leaves 5 trailing zeros),
+// while rules created before that change are still 136 bytes on devnet. An
+// `=== 136` check silently drops every rule created after the upgrade.
+//
+//                        TeamWin    GoalScored
+//   disc        0..8       yes         yes
+//   vault(32)   8..40      yes         yes
+//   rule_id     40..42     yes         yes
+//   trigger tag 42         0           1
+//     team_id   43..47     43..47      43..47
+//     stat_key  --         --          47..51
+//     threshold --         --          51
+//   action tag             47          52
+//     amount_usdc          48..56      53..61
+//     target_mint(32)      56..88      61..93
+//     slippage_bps         88..90      93..95
+//   match_id               90..98      95..103
+//   match_end_ts           98..106     103..111
+//   max_executions         106..108    111..113
+//   executions_done        108..110    113..115
+//   is_active              110         115
+//   bump                   111         116
+//   reserved(24)           112..136    117..141
+const TEAM_WIN_OFF   = { amt: 48, slip: 88, mid: 90, endTs: 98,  max: 106, done: 108, act: 110, actionTag: 47 } as const;
+const GOAL_SCORED_OFF = { amt: 53, slip: 93, mid: 95, endTs: 103, max: 111, done: 113, act: 115, actionTag: 52 } as const;
+
 export function decodeRule(pubkey: PublicKey, data: Buffer): RuleView | null {
-  if (data.length !== 136 || !data.subarray(0, 8).equals(Buffer.from(ACCT_DISC.Rule))) return null;
+  if (data.length < 136 || !data.subarray(0, 8).equals(Buffer.from(ACCT_DISC.Rule))) return null;
   const triggerTag = data[42];
-  const actionTag = data[47];
+  if (triggerTag !== 0 && triggerTag !== 1) return null; // unknown/newer variant — don't misread it
+  const isGoal = triggerTag === 1;
+  if (isGoal && data.length < 141) return null; // truncated GoalScored account
+  const O = isGoal ? GOAL_SCORED_OFF : TEAM_WIN_OFF;
+  const actionTag = data[O.actionTag]; // 0 = SwapAndSave (only variant)
+
   return {
     pubkey: pubkey.toBase58(),
     vault: new PublicKey(data.subarray(8, 40)).toBase58(),
     ruleId: data.readUInt16LE(40),
-    teamId: triggerTag === 0 ? data.readUInt32LE(43) : null,
-    amountUsdc: actionTag === 0 ? data.readBigUInt64LE(48).toString() : null,
-    maxSlippageBps: actionTag === 0 ? data.readUInt16LE(88) : null,
-    matchId: data.readBigUInt64LE(90).toString(),
-    matchEndTs: Number(data.readBigInt64LE(98)),
-    maxExecutions: data.readUInt16LE(106),
-    executionsDone: data.readUInt16LE(108),
-    isActive: data[110] === 1,
+    triggerKind: isGoal ? "GoalScored" : "TeamWin",
+    teamId: data.readUInt32LE(43), // same offset in both variants
+    statKey: isGoal ? data.readUInt32LE(47) : null,
+    threshold: isGoal ? data[51] : null,
+    amountUsdc: actionTag === 0 ? data.readBigUInt64LE(O.amt).toString() : null,
+    maxSlippageBps: actionTag === 0 ? data.readUInt16LE(O.slip) : null,
+    matchId: data.readBigUInt64LE(O.mid).toString(),
+    matchEndTs: Number(data.readBigInt64LE(O.endTs)),
+    maxExecutions: data.readUInt16LE(O.max),
+    executionsDone: data.readUInt16LE(O.done),
+    isActive: data[O.act] === 1,
   };
 }
 

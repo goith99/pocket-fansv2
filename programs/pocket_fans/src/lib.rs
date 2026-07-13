@@ -9,6 +9,11 @@ pub use constants::*;
 pub use instructions::*;
 pub use state::*;
 
+// txoracle is deliberately not glob re-exported from instructions.rs, but the
+// #[program] module below needs this type by name for the execute_rule_verified
+// instruction argument (and for IDL generation).
+pub use instructions::txoracle::StatValidationInput;
+
 declare_id!("4f74EBY7KMe8mUP9MpNzRnPzW6LojYX8wm56ZZz3iDgB");
 
 // SELF-CLAIM MODEL — no oracle, no admin, anywhere in this program.
@@ -54,6 +59,19 @@ pub mod pocket_fans {
     /// instructions/execute_rule.rs for the full trust-model rationale.
     pub fn execute_rule(ctx: Context<ExecuteRule>, rule_id: u16) -> Result<()> {
         instructions::execute_rule::handler(ctx, rule_id)
+    }
+
+    /// GoalScored trigger — callable by ANYONE (a permissionless keeper bot, or
+    /// the owner themself as a manual fallback). No signer identity is trusted;
+    /// the Txoracle `validate_stat_v2` CPI verdict is the only gate. Entirely
+    /// separate from `execute_rule` above, which stays owner-signed and
+    /// time-guarded. See instructions/execute_rule_verified.rs for the rationale.
+    pub fn execute_rule_verified(
+        ctx: Context<ExecuteRuleVerified>,
+        rule_id: u16,
+        payload: StatValidationInput,
+    ) -> Result<()> {
+        instructions::execute_rule_verified::handler(ctx, rule_id, payload)
     }
 
     /// User: deactivate a rule and clear its SPL delegation.

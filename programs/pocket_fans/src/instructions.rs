@@ -7,12 +7,18 @@
 
 pub mod create_rule;
 pub mod execute_rule;
+pub mod execute_rule_verified;
 pub mod initialize_vault;
 pub mod revoke_rule;
+/// Txoracle CPI interface. Not glob re-exported: it has no #[derive(Accounts)]
+/// context of its own, and its types are consumed via the full path
+/// `crate::instructions::txoracle::...`.
+pub mod txoracle;
 pub mod withdraw_from_vault;
 
 pub use create_rule::*;
 pub use execute_rule::*;
+pub use execute_rule_verified::*;
 pub use initialize_vault::*;
 pub use revoke_rule::*;
 pub use withdraw_from_vault::*;

@@ -133,4 +133,76 @@ async function getFinishedResult(fixtureId) {
   throw new Error(`scores/historical/${fixtureId} fetch failed: ${(lastErr && lastErr.message) || 'unknown'}`);
 }
 
-module.exports = { getFixtures, getFinishedResult };
+// ---------------------------------------------------------------------------
+// GoalScored keeper endpoints.
+//
+// AUTH: identical to everything above — guest jwt + X-Api-Token via headers().
+// Confirmed live on 2026-07-14: our existing TXLINE_API_TOKEN already returns
+// HTTP 200 with a full proof payload from /scores/stat-validation. No separate
+// on-chain subscribe() + /api/token/activate is required for this endpoint.
+// ---------------------------------------------------------------------------
+
+/**
+ * Current score-event snapshot for ONE fixture. Note the fixtureId is a PATH
+ * segment, not a query param (`?fixtureId=` 404s).
+ *
+ * Deliberately used instead of /scores/historical for the live loop: historical
+ * replays the fixture's ENTIRE event stream (~886 events / ~10s on a finished
+ * match — see FETCH_TIMEOUT_MS above), which is far too heavy to poll every 15s.
+ * This returns only the current snapshot (~38 events / ~1s).
+ */
+async function getScoresSnapshot(fixtureId) {
+  const f = timedFetch(`${config.apiOrigin}/api/scores/snapshot/${fixtureId}`, { headers: await headers() });
+  try {
+    const res = await f.promise;
+    if (res.status === 404) return [];
+    if (!res.ok) throw new Error(`scores/snapshot/${fixtureId} HTTP ${res.status}`);
+    const j = await res.json();
+    return Array.isArray(j) ? j : [];
+  } finally { f.done(); }
+}
+
+/**
+ * The LATEST event carrying a Stats map, by highest Seq. The snapshot array is
+ * not guaranteed to be Seq-ordered, so pick by max Seq rather than trusting
+ * array position. Returns null if the fixture has no stat-bearing event yet.
+ */
+function latestStatEvent(events) {
+  let best = null;
+  for (const e of events) {
+    if (!e || !e.Stats || !Object.keys(e.Stats).length) continue;
+    const seq = Number(e.Seq);
+    if (!Number.isFinite(seq)) continue;
+    if (!best || seq > Number(best.Seq)) best = e;
+  }
+  return best;
+}
+
+/**
+ * Merkle proof payload for `statKeys` at a given fixture+seq. Returns the RAW
+ * API response — map it with statvalidation.cjs buildStatValidationInput()
+ * before encoding (the API's field names are not 1:1 with the on-chain struct).
+ * Returns null on 404 (no leaf for that key/seq — e.g. a stat that doesn't exist
+ * at that point), throws on any other failure.
+ */
+async function getStatValidation(fixtureId, seq, statKeys) {
+  const url = `${config.apiOrigin}/api/scores/stat-validation`
+    + `?fixtureId=${fixtureId}&seq=${seq}&statKeys=${statKeys.join(',')}`;
+  const f = timedFetch(url, { headers: await headers() });
+  try {
+    const res = await f.promise;
+    if (res.status === 404) return null;
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`scores/stat-validation HTTP ${res.status}: ${body.slice(0, 200)}`);
+    }
+    return await res.json();
+  } finally { f.done(); }
+}
+
+// `headers` and `timedFetch` are exported so callers can reuse this module's
+// auth + timeout discipline rather than duplicating either.
+module.exports = {
+  getFixtures, getFinishedResult, headers, timedFetch,
+  getScoresSnapshot, latestStatEvent, getStatValidation,
+};

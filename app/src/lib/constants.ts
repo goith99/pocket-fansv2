@@ -21,14 +21,31 @@ export const WSOL_DECIMALS = 9;
 // for knockout matches with margin; adjust per-fixture in the UI if needed.
 export const MATCH_END_BUFFER_SECS = 3 * 60 * 60;
 
-// Instruction discriminators (copied verbatim from the IDL).
+// Instruction discriminators (copied verbatim from the IDL; each is
+// sha256("global:<name>")[0..8] — re-derived and cross-checked against
+// target/idl/pocket_fans.json, not hand-written).
 export const DISC = {
   initialize_vault: [48, 191, 163, 44, 71, 129, 63, 164],
   create_rule: [225, 163, 1, 6, 230, 91, 203, 199],
   revoke_rule: [41, 239, 224, 254, 61, 31, 56, 1],
   withdraw_from_vault: [180, 34, 37, 46, 156, 0, 211, 238],
   execute_rule: [143, 36, 13, 104, 240, 240, 207, 192],
+  execute_rule_verified: [109, 158, 73, 235, 69, 145, 96, 155],
 } as const;
+
+// --- TxODDS Txoracle (devnet) — CPI target for the GoalScored trigger ---
+// Mirrors programs/pocket_fans/src/constants.rs TXORACLE_PROGRAM_ID.
+export const TXORACLE_PROGRAM = new PublicKey("6pW64gN1s2uqjHkn1unFeEjAwJkPGHoppGvS715wyP2J");
+
+// TxLINE soccer stat keys: 1 = home goals, 2 = away goals (period offset 0 =
+// full-match total). WHICH of the two a rule pins depends on the side the
+// backed team plays on in that specific fixture — resolved at create_rule time.
+export const STAT_KEY_HOME_GOALS = 1;
+export const STAT_KEY_AWAY_GOALS = 2;
+
+// validate_stat_v2 walks several Merkle branches; TxLINE's own examples raise
+// the CU limit to 1.4M for multi-stat proofs (the 200k default is not enough).
+export const VERIFY_COMPUTE_UNITS = 1_400_000;
 
 // Account discriminators.
 export const ACCT_DISC = {

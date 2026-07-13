@@ -72,19 +72,34 @@ pub struct Rule {
 /// only affects newly created Rule accounts (they allocate for the larger enum);
 /// existing rules keep their original size and content, so no data migration.
 ///
-/// NOTE (self-claim model): this enum is retained for forward-compat / UI
-/// display (e.g. showing "Team X to win") but is NOT evaluated on-chain by
-/// execute_rule anymore — there is no oracle-reported MatchResult to check it
-/// against. The only on-chain gate is the time guard on `match_end_ts`.
+/// NOTE: the two variants below use DIFFERENT trust models, and each is executed
+/// by its own dedicated instruction. Do not add a variant without deciding which
+/// instruction claims it.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq, Eq, Debug, InitSpace)]
 pub enum TriggerType {
-    /// Display/UX intent: "claim after this team wins". ONLY variant implemented
-    /// this phase.
+    /// SELF-CLAIM path (`execute_rule`): display/UX intent "claim after this
+    /// team wins", gated purely by the on-chain time guard (`match_end_ts`) —
+    /// no oracle involved. Unchanged since the self-claim migration.
     TeamWin { team_id: u32 },
+
+    /// KEEPER + ORACLE path (`execute_rule_verified`): claimable by ANYONE
+    /// (a permissionless keeper bot, or the owner themself as a manual
+    /// fallback) the moment `stat_key`'s proven value reaches `threshold` —
+    /// typically mid-match, not gated by any time window. Trust comes entirely
+    /// from the Txoracle `validate_stat_v2` CPI verdict, never from the
+    /// caller's identity. `stat_key` is resolved off-chain at create_rule time
+    /// (1 = home goals, 2 = away goals, matching whichever side `team_id` plays
+    /// for this specific match). `team_id` is kept only for display/audit; the
+    /// on-chain predicate only ever checks `stat_key`, which is what is
+    /// cryptographically proven.
+    GoalScored {
+        team_id: u32,
+        stat_key: u32,
+        threshold: u8,
+    },
     // --- reserved for later phases ---
-    // GoalScored { team_id: u32, min_goals: u16 },
-    // CornerKick { team_id: u32, min_corners: u16 },
-    // YellowCard { team_id: u32 },
+    // CornerKick { team_id: u32, stat_key: u32, threshold: u8 },
+    // YellowCard { team_id: u32, stat_key: u32, threshold: u8 },
 }
 
 /// What the rule does when its trigger fires.
@@ -114,11 +129,12 @@ pub enum ActionType {
 
 impl TriggerType {
     /// Human-readable team id this trigger targets — used by the UI only.
-    /// (No longer evaluated against an oracle-reported result on-chain; see
-    /// the self-claim model note on `Rule` above.)
+    /// (Never evaluated against an oracle-reported result on-chain: TeamWin is
+    /// time-guarded, GoalScored is proven via `stat_key`, not via `team_id`.)
     pub fn team_id(&self) -> u32 {
         match self {
             TriggerType::TeamWin { team_id } => *team_id,
+            TriggerType::GoalScored { team_id, .. } => *team_id,
         }
     }
 }

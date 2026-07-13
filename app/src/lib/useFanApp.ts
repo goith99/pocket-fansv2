@@ -16,7 +16,7 @@ import { Connection, PublicKey, Transaction, TransactionInstruction } from "@sol
 import { createAssociatedTokenAccountIdempotentInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token";
 import {
   DEVUSDC_MINT, WSOL_MINT, DEVUSDC_DECIMALS, DEFAULT_MAX_EXECUTIONS, DEFAULT_MAX_SLIPPAGE_BPS,
-  MATCH_END_BUFFER_SECS,
+  MATCH_END_BUFFER_SECS, STAT_KEY_HOME_GOALS, STAT_KEY_AWAY_GOALS,
 } from "@/lib/constants";
 import {
   vaultPda, ata, ixInitializeVault, ixCreateRule, ixRevokeRule, ixWithdrawWsol,
@@ -27,7 +27,15 @@ import { TEAM_BY_ID } from "@/lib/flags";
 import { useTxFlow } from "@/components/TransactionFlow";
 
 export interface Team { id: number; name: string }
-interface Fixture { fixtureId: number; startTime: number; participant1: { id: number }; participant2: { id: number }; status: "upcoming" | "live" | "finished" }
+// participant1IsHome is already served by /api/schedule (see serverSupabase.ts) —
+// it is what decides whether a backed team's goals are stat_key 1 (home) or 2
+// (away) for THIS fixture.
+interface Fixture {
+  fixtureId: number; startTime: number;
+  participant1: { id: number }; participant2: { id: number };
+  participant1IsHome: boolean;
+  status: "upcoming" | "live" | "finished";
+}
 
 export function useFanApp() {
   const { ready, authenticated, login, logout, user } = usePrivy();
@@ -159,7 +167,69 @@ export function useFanApp() {
         }
       }
       ixs.push(ixCreateRule({
-        owner, vaultTotalRules: uv.totalRules, teamId,
+        owner, vaultTotalRules: uv.totalRules, trigger: { kind: "TeamWin", teamId },
+        amountUsdc, maxSlippageBps: DEFAULT_MAX_SLIPPAGE_BPS, maxExecutions: DEFAULT_MAX_EXECUTIONS,
+        matchId, matchEndTs,
+      }));
+      return submit(ixs, onSent);
+    });
+    if (sig) await refresh();
+    return sig;
+  }, [address, connection, fixtures, refresh, run]);
+
+  // GOALSCORED (keeper + oracle). A deliberate SIBLING of createChallenge rather
+  // than a flag on it: the TeamWin path above stays byte-for-byte unchanged, the
+  // args differ (threshold), and the resulting rule is claimed through a
+  // completely different instruction (execute_rule_verified, submitted by anyone
+  // with a proof — never self-claimed on a timer).
+  //
+  // stat_key is resolved HERE, at creation, and pinned into the rule: the
+  // on-chain predicate only ever checks stat_key, so it must match the side the
+  // backed team actually plays on in THIS fixture. Getting it wrong would mean
+  // proving the opponent's goals.
+  const createGoalChallenge = useCallback(async (teamId: number, amountStr: string, threshold: number) => {
+    if (!address) return null;
+    const owner = new PublicKey(address);
+    const amountUsdc = BigInt(Math.round(Number(amountStr) * 10 ** DEVUSDC_DECIMALS));
+    const sig = await run("Setting up your goal challenge", async (onSent) => {
+      if (amountUsdc <= 0n) throw new Error("Enter an amount greater than 0");
+      if (!Number.isInteger(threshold) || threshold < 1 || threshold > 255) {
+        throw new Error("Goals must be a whole number between 1 and 255");
+      }
+      const fixture = nextFixtureForTeam(teamId);
+      if (!fixture) throw new Error("No scheduled match found for this team yet");
+
+      // Is the backed team the HOME side in this fixture?
+      const isP1 = fixture.participant1.id === teamId;
+      const isHome = isP1 ? fixture.participant1IsHome : !fixture.participant1IsHome;
+      const statKey = isHome ? STAT_KEY_HOME_GOALS : STAT_KEY_AWAY_GOALS;
+
+      const matchId = BigInt(fixture.fixtureId);
+      // Stored but UNUSED by execute_rule_verified (that fires on the proof,
+      // mid-match). Kept consistent with the TeamWin path so the field always
+      // means the same thing.
+      const matchEndTs = BigInt(Math.floor(fixture.startTime / 1000) + MATCH_END_BUFFER_SECS);
+
+      const ixs: TransactionInstruction[] = [];
+      const uv = await getUserVault(connection, owner);
+      if (!uv.exists) ixs.push(ixInitializeVault(owner));
+      const usdcAta = getAssociatedTokenAddressSync(DEVUSDC_MINT, owner);
+      if (!(await connection.getAccountInfo(usdcAta))) {
+        ixs.push(createAssociatedTokenAccountIdempotentInstruction(owner, usdcAta, owner, DEVUSDC_MINT));
+      }
+      const vault = vaultPda(owner);
+      // The keeper cannot create these later — it only pays fees and has no
+      // authority to open ATAs for someone else's vault. They MUST exist before
+      // the rule can ever fire, so create them here as the TeamWin path does.
+      for (const mint of [DEVUSDC_MINT, WSOL_MINT]) {
+        const vaultAta = ata(mint, vault);
+        if (!(await connection.getAccountInfo(vaultAta))) {
+          ixs.push(createAssociatedTokenAccountIdempotentInstruction(owner, vaultAta, vault, mint));
+        }
+      }
+      ixs.push(ixCreateRule({
+        owner, vaultTotalRules: uv.totalRules,
+        trigger: { kind: "GoalScored", teamId, statKey, threshold },
         amountUsdc, maxSlippageBps: DEFAULT_MAX_SLIPPAGE_BPS, maxExecutions: DEFAULT_MAX_EXECUTIONS,
         matchId, matchEndTs,
       }));
@@ -256,6 +326,6 @@ export function useFanApp() {
     ready, authenticated, login, logout, user, address,
     sol, usdc, savedSol, teams, challenges, teamName,
     txState, resetTx, busy, refresh, loadError,
-    createChallenge, cancelChallenge, withdrawSavings, claimChallenge, getDevUsdc,
+    createChallenge, createGoalChallenge, cancelChallenge, withdrawSavings, claimChallenge, getDevUsdc,
   };
 }

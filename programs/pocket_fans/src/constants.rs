@@ -62,3 +62,25 @@ pub const Q64: u128 = 1u128 << 64;
 /// in the future (defense-in-depth against a fat-fingered/malicious client).
 /// 120 days is comfortably beyond the World Cup 2026 tournament window.
 pub const MAX_MATCH_END_TS_HORIZON_SECS: i64 = 120 * 24 * 60 * 60;
+
+// ---------------------------------------------------------------------------
+// TxODDS Txoracle program (DEVNET) — CPI target for the GoalScored trigger.
+// Used ONLY by execute_rule_verified; the TeamWin/self-claim path never touches
+// an oracle. Mainnet id (for the later mainnet phase):
+//   9ExbZjAapQww1vfcisDmrngPinHTEfpjYRWMunJgcKaA
+// ---------------------------------------------------------------------------
+pub const TXORACLE_PROGRAM_ID: Pubkey =
+    Pubkey::from_str_const("6pW64gN1s2uqjHkn1unFeEjAwJkPGHoppGvS715wyP2J");
+
+/// Anchor sighash of Txoracle's `validate_stat_v2` = sha256("global:validate_stat_v2")[..8].
+pub const VALIDATE_STAT_V2_DISCRIMINATOR: [u8; 8] = [208, 215, 194, 214, 241, 71, 246, 178];
+
+// ---------------------------------------------------------------------------
+// TxLINE soccer score stat keys (base key + period offset).
+// key = base (1/2 = home/away goals) + period offset (0 = full-match total).
+// Which of the two applies to a given rule depends on whether that rule's team
+// is the home or away side in that specific fixture — resolved off-chain at
+// create_rule time and pinned into TriggerType::GoalScored.stat_key.
+// ---------------------------------------------------------------------------
+pub const STAT_KEY_HOME_GOALS: u32 = 1;
+pub const STAT_KEY_AWAY_GOALS: u32 = 2;

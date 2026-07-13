@@ -36,4 +36,18 @@ pub enum PocketFansError {
     MatchNotFinished,
     #[msg("Only the rule's owner may execute it")]
     NotRuleOwner,
+
+    // --- GoalScored trigger (execute_rule_verified / Txoracle CPI) ---
+    #[msg("Provided program is not the Txoracle program")]
+    InvalidOracleProgram,
+    #[msg("Txoracle CPI returned no data")]
+    OracleNoReturnData,
+    #[msg("Txoracle rejected the proof — condition not proven true")]
+    OracleRejected,
+    #[msg("Proof fixture_id does not match this rule's match_id")]
+    WrongFixture,
+    #[msg("Proof stat layout does not match this rule's pinned trigger")]
+    InvalidStatLayout,
+    #[msg("This instruction does not support this rule's trigger type")]
+    UnsupportedTrigger,
 }
