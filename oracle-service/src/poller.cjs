@@ -27,7 +27,7 @@
 // sets up for the app does not need to change.
 const { createClient } = require('@supabase/supabase-js');
 const {
-  Connection, PublicKey, Transaction, sendAndConfirmTransaction,
+  Connection, PublicKey,
 } = require('@solana/web3.js');
 const { config } = require('./config.cjs');
 const log = require('./logger.cjs');
@@ -235,19 +235,24 @@ async function checkAndTriggerGoals(fixtureId, openRules) {
       ta0, ta1, ta2, whirlpoolOracle,
     });
 
-    const tx = new Transaction()
-      .add(statvalidation.ixComputeBudget()) // validate_stat_v2 exceeds the 200k default
-      .add(ix);
-    tx.feePayer = keeper.publicKey;
-    tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
-
-    const sig = await sendAndConfirmTransaction(connection, tx, [keeper], {
-      commitment: 'confirmed',
-      skipPreflight: false, // let a bad proof fail in simulation, before it costs a fee
+    // v0 + Address Lookup Table, NOT a legacy Transaction. A real mid-match
+    // proof (subTreeProof 5..8) makes the legacy encoding 1240..1372 B, over
+    // the 1232 B limit — it throws at construction and the rule never fires.
+    // See the block comment above LOOKUP_TABLE_ADDRESS in statvalidation.cjs.
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+    const { vtx, size } = await statvalidation.buildExecuteRuleVerifiedTx({
+      connection, keeper, ix, blockhash,
     });
+
+    const sig = await connection.sendTransaction(vtx, {
+      skipPreflight: false, // let a bad proof fail in simulation, before it costs a fee
+      preflightCommitment: 'confirmed',
+    });
+    await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed');
     log.info(
       `pollGoalWatch: FIRED rule ${rule.rulePda} (fixture ${fixtureId}, ` +
-        `stat_key ${rule.statKey} = ${proven.stat.value} >= ${rule.threshold}, seq ${seq}) sig ${sig}`,
+        `stat_key ${rule.statKey} = ${proven.stat.value} >= ${rule.threshold}, seq ${seq}, ` +
+        `v0 tx ${size}B) sig ${sig}`,
     );
    } catch (e) {
     // Isolate per RULE as well as per fixture: one rule's failed proof/tx must

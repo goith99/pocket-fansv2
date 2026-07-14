@@ -15,6 +15,7 @@
 // EXACTLY. It is the borsh wire format — do not reorder.
 const {
   PublicKey, TransactionInstruction, ComputeBudgetProgram,
+  TransactionMessage, VersionedTransaction,
 } = require('@solana/web3.js');
 
 const PROGRAM_ID = new PublicKey('4f74EBY7KMe8mUP9MpNzRnPzW6LojYX8wm56ZZz3iDgB');
@@ -225,17 +226,130 @@ function ixExecuteRuleVerified(args) {
 const ixComputeBudget = () =>
   ComputeBudgetProgram.setComputeUnitLimit({ units: VERIFY_COMPUTE_UNITS });
 
+// ---------------------------------------------------------------------------
+// v0 transaction + Address Lookup Table.
+//
+// WHY THIS IS NOT OPTIONAL — a legacy Transaction CANNOT carry this instruction.
+//
+// execute_rule_verified takes 19 accounts, and its `payload` arg is a Merkle
+// proof whose size varies with TxLINE's tree shape. Measured against REAL
+// /scores/stat-validation responses from 9 finished World Cup fixtures:
+//
+//   subTreeProof (= fixture_proof on-chain) depth:  1..8   <- the size driver
+//   mainTreeProof depth:                            1..2   <- NOT the driver
+//   legacy serialized tx:                    1075..1372 B  (hard limit 1232)
+//   => 44 of 54 real proofs EXCEED the limit and throw "Transaction too large"
+//      at construction time, before ever reaching the network.
+//
+// Crucially, the SHALLOW proofs (subTree=1, which fit) only occur at the
+// final-whistle event. A GoalScored rule fires MID-MATCH, which is exactly
+// where subTreeProof is 5..8. So the legacy path is not "usually fine" — it is
+// broken for essentially every real trigger. It went unnoticed because the one
+// committed test fixture (stat_validation_18179759.json) happens to be an
+// end-of-match, single-update proof with subTree=1 — an outlier.
+//
+// Moving the 11 STATIC accounts (mints, whirlpool + vaults + oracle + tick
+// arrays, and the whirlpool/txoracle/token program ids) into a lookup table
+// drops them from 32 bytes each to a 1-byte index:
+//
+//   worst real proof (fixture 18187298 seq 64, subTree=8):
+//     legacy: 1274 B -> REJECTED      v0+ALT: 969 B -> fits, 263 B spare
+//
+// The program is NOT changed by this: the instruction still carries the same
+// 19 accounts in the same order. An ALT only changes how the *transaction*
+// encodes those account keys, not what execute_rule_verified receives.
+// ---------------------------------------------------------------------------
+
+/** Devnet ALT holding the 14 static accounts. Authority: the deploy wallet. */
+const LOOKUP_TABLE_ADDRESS = new PublicKey(
+  process.env.LOOKUP_TABLE_ADDRESS || 'Dm3LvzUA7u9GeMDzD7TTrUKqbPFo7uYVzJMjbWRMy6pf',
+);
+
+/**
+ * The accounts of execute_rule_verified that are STATIC (not per-user, not
+ * per-rule) and therefore live in the lookup table. Everything else — the
+ * keeper, the vault/rule PDAs, the token accounts, daily_scores_roots — must
+ * stay in the transaction's static key list.
+ *
+ * Tick arrays are derived from the live pool price, so they're passed in. The
+ * on-chain table holds the current array plus two neighbours either side, so
+ * ordinary price drift doesn't push one out of the table.
+ *
+ * Exported so the offline size test in app/scripts/encoder-parity.ts can build
+ * the same table shape without hitting the network.
+ */
+function altStaticAddresses({ ta0, ta1, ta2, whirlpoolOracle }) {
+  const fixed = [
+    DEVUSDC_MINT, WSOL_MINT, WHIRLPOOL, WHIRLPOOL_VAULT_A, WHIRLPOOL_VAULT_B,
+    new PublicKey(whirlpoolOracle), WHIRLPOOL_PROGRAM, TXORACLE_PROGRAM, TOKEN_PROGRAM,
+    new PublicKey(ta0), new PublicKey(ta1), new PublicKey(ta2),
+  ];
+  const seen = new Set();
+  return fixed.filter((pk) => {
+    const k = pk.toBase58();
+    if (seen.has(k)) return false; // ta2 === ta0 in the common case
+    seen.add(k);
+    return true;
+  });
+}
+
+let _lut = null; // the table is immutable in practice; fetch once per process
+async function getLookupTable(connection) {
+  if (_lut) return _lut;
+  const { value } = await connection.getAddressLookupTable(LOOKUP_TABLE_ADDRESS);
+  if (!value) {
+    throw new Error(
+      `address lookup table ${LOOKUP_TABLE_ADDRESS.toBase58()} not found. ` +
+        'execute_rule_verified cannot be sent as a legacy tx (see the comment above ' +
+        'LOOKUP_TABLE_ADDRESS) — refusing to fall back to one.',
+    );
+  }
+  _lut = value;
+  return _lut;
+}
+
+/**
+ * Build the signed v0 transaction for execute_rule_verified.
+ *
+ * Deliberately throws rather than falling back to a legacy Transaction if the
+ * table is missing: a silent fallback would just resurface as
+ * "Transaction too large" for any real mid-match proof.
+ */
+async function buildExecuteRuleVerifiedTx({ connection, keeper, ix, blockhash }) {
+  const lut = await getLookupTable(connection);
+  const bh = blockhash || (await connection.getLatestBlockhash()).blockhash;
+
+  const msg = new TransactionMessage({
+    payerKey: keeper.publicKey,
+    recentBlockhash: bh,
+    instructions: [ixComputeBudget(), ix],
+  }).compileToV0Message([lut]);
+
+  const vtx = new VersionedTransaction(msg);
+  vtx.sign([keeper]);
+
+  const size = vtx.serialize().length;
+  if (size > 1232) {
+    throw new Error(`v0 tx still ${size} B > 1232 — lookup table may be missing entries`);
+  }
+  return { vtx, size };
+}
+
 module.exports = {
   encodeStatValidationInput,
   buildStatValidationInput,
   ixExecuteRuleVerified,
   ixComputeBudget,
+  buildExecuteRuleVerifiedTx,
+  getLookupTable,
+  altStaticAddresses,
   dailyScoresRootsPda,
   ticksForBToA,
   vaultPda,
   rulePda,
   ata,
   VERIFY_COMPUTE_UNITS,
+  LOOKUP_TABLE_ADDRESS,
   PROGRAM_ID,
   TXORACLE_PROGRAM,
 };

@@ -10,16 +10,20 @@
 //
 //   1. here:            pf.ts bytes === statvalidation.cjs bytes
 //   2. in the Rust test: those bytes deserialize into the real on-chain struct
+//   3. here:            the resulting transaction actually FITS in a packet
 //
-// Together that means neither encoder can drift from the other OR from the
-// program. If you change one, this fails.
+// Assertion 3 exists because of a real, shipped bug — see TX SIZE below.
 //
 // Usage: npx tsx scripts/encoder-parity.ts <out-dir>
-//   writes <out-dir>/parity_ts.bin and <out-dir>/parity_cjs.bin
+//   writes <out-dir>/parity_{ts,cjs}_<fixtureId>.bin for each fixture
 import { Buffer } from "buffer";
 import fs from "fs";
 import path from "path";
 import { createRequire } from "module";
+import {
+  Keypair, PublicKey, Transaction, TransactionMessage,
+  VersionedTransaction, AddressLookupTableAccount,
+} from "@solana/web3.js";
 import {
   encodeStatValidationInput, dailyScoresRootsPda, StatValidationInput,
 } from "../src/lib/pf";
@@ -31,66 +35,187 @@ const statvalidation = require_("../../oracle-service/src/statvalidation.cjs");
 const outDir = process.argv[2];
 if (!outDir) throw new Error("usage: encoder-parity.ts <out-dir>");
 
-// A REAL /api/scores/stat-validation response (fixture 18179759, seq 885,
-// statKeys=1), captured live. Not synthetic — it carries the API's actual field
-// names, which are NOT 1:1 with the on-chain struct (subTreeProof ->
-// fixture_proof, summary.eventStatsSubTreeRoot -> events_sub_tree_root).
-const FIXTURE = path.resolve(
-  __dirname,
-  "../../programs/pocket_fans/tests/fixtures/stat_validation_18179759.json",
-);
-const sv = JSON.parse(fs.readFileSync(FIXTURE, "utf8"));
+const PACKET_LIMIT = 1232;
 
-// --- side A: the keeper's CJS module (mapping + encoding) ---
-const payloadCjs = statvalidation.buildStatValidationInput(sv);
-const bytesCjs: Buffer = statvalidation.encodeStatValidationInput(payloadCjs);
-
-// --- side B: pf.ts, fed the same mapping expressed in its own types ---
-const node = (n: any) => ({ hash: n.hash, isRightSibling: n.isRightSibling === true });
-const payloadTs: StatValidationInput = {
-  ts: BigInt(sv.ts),
-  fixtureSummary: {
-    fixtureId: BigInt(sv.summary.fixtureId),
-    updateStats: {
-      updateCount: Number(sv.summary.updateStats.updateCount),
-      minTimestamp: BigInt(sv.summary.updateStats.minTimestamp),
-      maxTimestamp: BigInt(sv.summary.updateStats.maxTimestamp),
-    },
-    eventsSubTreeRoot: sv.summary.eventStatsSubTreeRoot,
+// ---------------------------------------------------------------------------
+// TX SIZE — why there are TWO fixtures, and why one of them is "the big one".
+//
+// execute_rule_verified's payload is a Merkle proof whose size depends on
+// TxLINE's tree shape. Measured across 54 real proofs from 9 finished World Cup
+// fixtures: subTreeProof (= fixture_proof on-chain) ranges 1..8, and as a LEGACY
+// transaction that puts 42 of the 54 OVER the 1232-byte packet limit — they
+// throw "Transaction too large" at construction and the rule silently never
+// fires.
+//
+// This went unnoticed for a whole feature cycle because the only committed
+// fixture was 18179759 — an END-OF-MATCH, single-update proof with
+// subTreeProof=1, which fits. It is an OUTLIER. A GoalScored rule fires
+// MID-MATCH, which is exactly where the proof is deepest.
+//
+// So: 18187298 (mid-match, subTreeProof=8) is committed alongside it, and this
+// harness asserts BOTH of:
+//   a) it still fits once encoded as v0 + Address Lookup Table  (the fix), and
+//   b) it would NOT have fit as a legacy transaction            (proof that this
+//      fixture genuinely exercises the risk — so if someone "simplifies" it back
+//      to a shallow proof, this fails loudly instead of going quiet again).
+// ---------------------------------------------------------------------------
+const FIXTURES = [
+  {
+    id: 18_179_759,
+    file: "stat_validation_18179759.json",
+    note: "end-of-match, shallow proof (subTreeProof=1) — fits even as a legacy tx",
+    expectFitsLegacy: true,
   },
-  fixtureProof: (sv.subTreeProof || []).map(node),
-  mainTreeProof: (sv.mainTreeProof || []).map(node),
-  eventStatRoot: sv.eventStatRoot,
-  stats: sv.statsToProve.map((stat: any, i: number) => ({
-    stat: { key: Number(stat.key), value: Number(stat.value), period: Number(stat.period) },
-    statProof: sv.statProofs[i].map(node),
-  })),
-};
-const bytesTs = encodeStatValidationInput(payloadTs);
+  {
+    id: 18_187_298,
+    file: "stat_validation_18187298_midmatch.json",
+    note: "MID-MATCH, deep proof (subTreeProof=8) — the realistic GoalScored case",
+    expectFitsLegacy: false, // must NOT fit as legacy; that is the whole point
+  },
+];
 
-// --- assertion 1: the two encoders agree, byte for byte ---
-if (!bytesTs.equals(bytesCjs)) {
-  console.error(
-    `ENCODER DRIFT: pf.ts produced ${bytesTs.length} bytes, ` +
-      `statvalidation.cjs produced ${bytesCjs.length} bytes, and they differ.\n` +
-      "These two MUST stay in lockstep — see the header of this file.",
-  );
-  process.exit(1);
+const node = (n: any) => ({ hash: n.hash, isRightSibling: n.isRightSibling === true });
+
+/** Encode via pf.ts, fed the same mapping statvalidation.cjs applies. */
+function toPfTs(sv: any): StatValidationInput {
+  return {
+    ts: BigInt(sv.ts),
+    fixtureSummary: {
+      fixtureId: BigInt(sv.summary.fixtureId),
+      updateStats: {
+        updateCount: Number(sv.summary.updateStats.updateCount),
+        minTimestamp: BigInt(sv.summary.updateStats.minTimestamp),
+        maxTimestamp: BigInt(sv.summary.updateStats.maxTimestamp),
+      },
+      eventsSubTreeRoot: sv.summary.eventStatsSubTreeRoot,
+    },
+    fixtureProof: (sv.subTreeProof || []).map(node),
+    mainTreeProof: (sv.mainTreeProof || []).map(node),
+    eventStatRoot: sv.eventStatRoot,
+    stats: sv.statsToProve.map((stat: any, i: number) => ({
+      stat: { key: Number(stat.key), value: Number(stat.value), period: Number(stat.period) },
+      statProof: sv.statProofs[i].map(node),
+    })),
+  };
 }
 
-// --- assertion 2: the daily_scores_roots PDA derivation also agrees ---
-const pdaTs = dailyScoresRootsPda(payloadTs.fixtureSummary.updateStats.minTimestamp).toBase58();
-const pdaCjs = statvalidation
-  .dailyScoresRootsPda(payloadCjs.fixtureSummary.updateStats.minTimestamp)
-  .toBase58();
-if (pdaTs !== pdaCjs) {
-  console.error(`PDA DRIFT: pf.ts=${pdaTs} statvalidation.cjs=${pdaCjs}`);
-  process.exit(1);
+/**
+ * Build the real execute_rule_verified tx both ways and report sizes. Fully
+ * OFFLINE: the lookup table is synthesised from statvalidation.altStaticAddresses
+ * rather than fetched, so this test never needs the network.
+ */
+function txSizes(payloadCjs: any) {
+  const keeper = Keypair.generate();
+  const vaultOwner = Keypair.generate().publicKey;
+  // Tick arrays/oracle are price-derived at runtime; any pubkey gives the same
+  // SIZE, which is all this is measuring.
+  const ta0 = Keypair.generate().publicKey;
+  const ta1 = Keypair.generate().publicKey;
+  const whirlpoolOracle = Keypair.generate().publicKey;
+  const ticks = { ta0, ta1, ta2: ta0, whirlpoolOracle };
+
+  const ix = statvalidation.ixExecuteRuleVerified({
+    caller: keeper.publicKey, vaultOwner, ruleId: 9, payload: payloadCjs, ...ticks,
+  });
+  const blockhash = "11111111111111111111111111111111";
+
+  // legacy (what the keeper used to build — kept ONLY to assert it still breaks)
+  const legacy = new Transaction().add(statvalidation.ixComputeBudget()).add(ix);
+  legacy.feePayer = keeper.publicKey;
+  legacy.recentBlockhash = blockhash;
+  const legacyBytes = legacy.serializeMessage().length + 1 + 64;
+
+  // v0 + ALT (what the keeper builds now)
+  const lut = new AddressLookupTableAccount({
+    key: statvalidation.LOOKUP_TABLE_ADDRESS as PublicKey,
+    state: {
+      deactivationSlot: 2n ** 64n - 1n,
+      lastExtendedSlot: 0,
+      lastExtendedSlotStartIndex: 0,
+      authority: keeper.publicKey,
+      addresses: statvalidation.altStaticAddresses(ticks),
+    },
+  });
+  const msg = new TransactionMessage({
+    payerKey: keeper.publicKey,
+    recentBlockhash: blockhash,
+    instructions: [statvalidation.ixComputeBudget(), ix],
+  }).compileToV0Message([lut]);
+  const v0 = new VersionedTransaction(msg);
+  v0.sign([keeper]);
+
+  return { legacyBytes, v0Bytes: v0.serialize().length, accounts: ix.keys.length };
 }
 
 fs.mkdirSync(outDir, { recursive: true });
-fs.writeFileSync(path.join(outDir, "parity_ts.bin"), bytesTs);
-fs.writeFileSync(path.join(outDir, "parity_cjs.bin"), bytesCjs);
+let failed = false;
 
-console.log(`encoder parity OK: ${bytesTs.length} bytes identical (pf.ts === statvalidation.cjs)`);
-console.log(`daily_scores_roots PDA agrees: ${pdaTs}`);
+for (const fx of FIXTURES) {
+  const file = path.resolve(__dirname, "../../programs/pocket_fans/tests/fixtures", fx.file);
+  const sv = JSON.parse(fs.readFileSync(file, "utf8"));
+
+  // --- side A: the keeper's CJS module (mapping + encoding) ---
+  const payloadCjs = statvalidation.buildStatValidationInput(sv);
+  const bytesCjs: Buffer = statvalidation.encodeStatValidationInput(payloadCjs);
+
+  // --- side B: pf.ts, fed the same mapping expressed in its own types ---
+  const bytesTs = encodeStatValidationInput(toPfTs(sv));
+
+  console.log(`\n[${fx.id}] ${fx.note}`);
+
+  // --- assertion 1: the two encoders agree, byte for byte ---
+  if (!bytesTs.equals(bytesCjs)) {
+    console.error(
+      `  ENCODER DRIFT: pf.ts produced ${bytesTs.length} bytes, ` +
+        `statvalidation.cjs produced ${bytesCjs.length} bytes, and they differ.\n` +
+        "  These two MUST stay in lockstep — see the header of this file.",
+    );
+    failed = true;
+    continue;
+  }
+
+  // --- assertion 2: the daily_scores_roots PDA derivation also agrees ---
+  const pdaTs = dailyScoresRootsPda(BigInt(sv.summary.updateStats.minTimestamp)).toBase58();
+  const pdaCjs = statvalidation
+    .dailyScoresRootsPda(payloadCjs.fixtureSummary.updateStats.minTimestamp)
+    .toBase58();
+  if (pdaTs !== pdaCjs) {
+    console.error(`  PDA DRIFT: pf.ts=${pdaTs} statvalidation.cjs=${pdaCjs}`);
+    failed = true;
+    continue;
+  }
+
+  // --- assertion 3: the transaction this payload produces must actually fit ---
+  const { legacyBytes, v0Bytes, accounts } = txSizes(payloadCjs);
+  const fitsLegacy = legacyBytes <= PACKET_LIMIT;
+
+  console.log(`  encoders agree : ${bytesTs.length} bytes, ${accounts} accounts`);
+  console.log(`  subTreeProof   : ${payloadCjs.fixtureProof.length}`);
+  console.log(`  legacy tx      : ${legacyBytes} B  ${fitsLegacy ? "(fits)" : "(TOO LARGE — as expected)"}`);
+  console.log(`  v0 + ALT tx    : ${v0Bytes} B  (${PACKET_LIMIT - v0Bytes} B spare)`);
+
+  if (v0Bytes > PACKET_LIMIT) {
+    console.error(
+      `  TX TOO LARGE: even as v0 + ALT this is ${v0Bytes} B > ${PACKET_LIMIT}. ` +
+        "The keeper cannot submit this proof. Check the lookup table contents.",
+    );
+    failed = true;
+  }
+  if (fitsLegacy !== fx.expectFitsLegacy) {
+    console.error(
+      fx.expectFitsLegacy
+        ? `  UNEXPECTED: this fixture no longer fits as a legacy tx (${legacyBytes} B).`
+        : `  FIXTURE NO LONGER EXERCISES THE SIZE RISK: it now fits as a legacy tx ` +
+          `(${legacyBytes} B <= ${PACKET_LIMIT}). This fixture exists specifically to be a ` +
+          `DEEP mid-match proof. Replace it with one whose subTreeProof is 5..8 — otherwise ` +
+          `the transaction-size regression this guards against becomes invisible again.`,
+    );
+    failed = true;
+  }
+
+  fs.writeFileSync(path.join(outDir, `parity_ts_${fx.id}.bin`), bytesTs);
+  fs.writeFileSync(path.join(outDir, `parity_cjs_${fx.id}.bin`), bytesCjs);
+}
+
+if (failed) process.exit(1);
+console.log(`\nencoder parity OK across ${FIXTURES.length} fixtures (pf.ts === statvalidation.cjs), all txs fit.`);
