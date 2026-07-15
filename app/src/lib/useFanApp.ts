@@ -35,6 +35,11 @@ interface Fixture {
   participant1: { id: number }; participant2: { id: number };
   participant1IsHome: boolean;
   status: "upcoming" | "live" | "finished";
+  // Present once finished. winnerId is the ParticipantId of the winner, or 0 for
+  // a true draw. The poller (oracle-service/src/poller.cjs) already folds the
+  // knockout penalty result into winnerId, so a knockout decided on penalties
+  // has a non-zero winnerId and a group-stage draw has winnerId 0.
+  score?: { p1: number; p2: number; winnerId: number } | null;
 }
 
 export function useFanApp() {
@@ -322,9 +327,29 @@ export function useFanApp() {
   // ParticipantId registry so finished-fixture teams still resolve (never "Team 1634").
   const teamName = useCallback((id: number) => teams.find((t) => t.id === id)?.name ?? TEAM_BY_ID[id] ?? `Team ${id}`, [teams]);
 
+  // Teams still in the tournament, for the picker. A team is eliminated once it
+  // has a FINISHED fixture with a DECISIVE result (winnerId !== 0) that it did
+  // NOT win. winnerId already accounts for knockout penalties (see Fixture.score
+  // above), so:
+  //   - group-stage draw  -> winnerId 0            -> nobody eliminated
+  //   - knockout on pens   -> winnerId = pen winner -> loser eliminated
+  //   - knockout finished but winnerId still 0 (pens not yet recorded) -> both
+  //     stay visible; erring toward showing a team, never wrongly hiding one.
+  // NOTE: only the PICKER uses this. `teams` stays the full list so teamName()
+  // still resolves an already-backed eliminated team's name.
+  const activeTeams = useMemo(() => {
+    const eliminated = new Set<number>();
+    for (const f of fixtures) {
+      if (f.status !== "finished" || !f.score || f.score.winnerId === 0) continue;
+      const loserId = f.score.winnerId === f.participant1.id ? f.participant2.id : f.participant1.id;
+      eliminated.add(loserId);
+    }
+    return teams.filter((t) => !eliminated.has(t.id));
+  }, [teams, fixtures]);
+
   return {
     ready, authenticated, login, logout, user, address,
-    sol, usdc, savedSol, teams, challenges, teamName,
+    sol, usdc, savedSol, teams, activeTeams, challenges, teamName,
     txState, resetTx, busy, refresh, loadError,
     createChallenge, createGoalChallenge, cancelChallenge, withdrawSavings, claimChallenge, getDevUsdc,
   };

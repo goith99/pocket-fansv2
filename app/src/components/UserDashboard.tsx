@@ -66,7 +66,7 @@ export default function UserDashboard() {
       />
       <TeamPickerSheet
         open={pickerOpen}
-        teams={app.teams}
+        teams={app.activeTeams}
         value={teamId === "" ? null : Number(teamId)}
         onSelect={(id) => setTeamId(id)}
         onClose={() => setPickerOpen(false)}
