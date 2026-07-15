@@ -199,9 +199,17 @@ async function checkAndTriggerGoals(fixtureId, openRules) {
       continue;
     }
 
+    // 404 -> null. EXPECTED, not a failure: the score snapshot can show the goal
+    // a moment before TxLINE's Merkle tree has a leaf for that key at that seq.
+    // Info, not warn — a genuine failure (bad token, 429, 5xx) THROWS instead
+    // (txline.cjs getStatValidation), lands in the per-rule catch below, and is
+    // logged there with its HTTP status. Keeping the two at different levels is
+    // what makes a real error visible instead of buried in normal 404 chatter.
     const sv = await txline.getStatValidation(fixtureId, seq, [rule.statKey]);
     if (!sv) {
-      log.warn(`pollGoalWatch: no proof leaf for fixture ${fixtureId} seq ${seq} key ${rule.statKey}`);
+      log.info(
+        `pollGoalWatch: no proof leaf yet for fixture ${fixtureId} seq ${seq} key ${rule.statKey} — retrying next tick`,
+      );
       continue;
     }
 
