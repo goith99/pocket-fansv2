@@ -10,7 +10,7 @@ use crate::constants::{
     WHIRLPOOL_PROGRAM_ID, WHIRLPOOL_SWAP_DISCRIMINATOR, WSOL_MINT,
 };
 use crate::error::PocketFansError;
-use crate::state::{ActionType, Rule, UserVault};
+use crate::state::{ActionType, Rule, TriggerType, UserVault};
 
 /// Execute a rule — SELF-CLAIM MODEL, no oracle and no admin trigger.
 ///
@@ -25,12 +25,15 @@ use crate::state::{ActionType, Rule, UserVault};
 /// Flow:
 ///   1. signer must be the rule's vault owner
 ///   2. rule must be active and under its execution cap
-///   3. Clock::unix_timestamp must be >= rule.match_end_ts (time guard only)
-///   4. pull `amount_usdc` from the user's USDC account into the vault's USDC
+///   3. trigger_type must be TeamWin — GoalScored rules are rejected so they
+///      cannot bypass the Txoracle proof in execute_rule_verified via the time
+///      guard below
+///   4. Clock::unix_timestamp must be >= rule.match_end_ts (time guard only)
+///   5. pull `amount_usdc` from the user's USDC account into the vault's USDC
 ///      account, using the vault PDA's SPL delegation (granted in create_rule)
-///   5. CPI Orca Whirlpool swap: vault USDC -> vault wSOL (a_to_b = false),
+///   6. CPI Orca Whirlpool swap: vault USDC -> vault wSOL (a_to_b = false),
 ///      min-out enforced from the rule's max_slippage_bps
-///   6. executions_done += 1
+///   7. executions_done += 1
 ///
 /// All token amounts are in raw base units (devUSDC 6dp, wSOL 9dp) — no scaling.
 #[derive(Accounts)]
@@ -119,7 +122,18 @@ pub fn handler(ctx: Context<ExecuteRule>, _rule_id: u16) -> Result<()> {
         PocketFansError::MaxExecutionsReached
     );
 
-    // 2) time guard ONLY — no result verification. See module doc for rationale.
+    // 2) trigger guard: this is the TeamWin self-claim path ONLY. A GoalScored
+    // rule MUST be executed through execute_rule_verified (Txoracle proof) —
+    // rejecting it here closes the bypass where the stored match_end_ts time
+    // guard could be used to self-claim a GoalScored rule without the goal ever
+    // being proven. Mirror of the guard in execute_rule_verified.rs, which
+    // rejects TeamWin with the same error.
+    match &rule.trigger_type {
+        TriggerType::TeamWin { .. } => {}
+        _ => return err!(PocketFansError::UnsupportedTrigger),
+    }
+
+    // 3) time guard ONLY — no result verification. See module doc for rationale.
     let now = Clock::get()?.unix_timestamp;
     require!(now >= rule.match_end_ts, PocketFansError::MatchNotFinished);
 
@@ -143,7 +157,7 @@ pub fn handler(ctx: Context<ExecuteRule>, _rule_id: u16) -> Result<()> {
     let seeds: &[&[u8]] = &[VAULT_SEED, owner_key.as_ref(), std::slice::from_ref(&vault_bump)];
     let signer_seeds: &[&[&[u8]]] = &[seeds];
 
-    // 3) pull USDC from user -> vault via the vault PDA's delegation
+    // 4) pull USDC from user -> vault via the vault PDA's delegation
     token::transfer(
         CpiContext::new_with_signer(
             ctx.accounts.token_program.key(),
@@ -157,11 +171,11 @@ pub fn handler(ctx: Context<ExecuteRule>, _rule_id: u16) -> Result<()> {
         amount_usdc,
     )?;
 
-    // 4) CPI Orca Whirlpool swap: vault USDC (token B) -> vault wSOL (token A).
+    // 5) CPI Orca Whirlpool swap: vault USDC (token B) -> vault wSOL (token A).
     //    a_to_b = false, amount_specified_is_input = true.
     swap_usdc_to_wsol(&ctx, amount_usdc, min_out, signer_seeds)?;
 
-    // 5) count the execution
+    // 6) count the execution
     let rule = &mut ctx.accounts.rule;
     rule.executions_done = rule
         .executions_done
