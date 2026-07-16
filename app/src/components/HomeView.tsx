@@ -13,8 +13,10 @@ const WHEN = [
   { label: "Yellow card", state: "soon" as const },
 ];
 const THEN = [
-  { label: "Save it", state: "active" as const },
-  { label: "Stake", state: "soon" as const },
+  { label: "Auto DCA", state: "active" as const },
+  // "Auto Stake" stays "soon" — the underlying Marinade staking action is not
+  // built yet; this is a label only.
+  { label: "Auto Stake", state: "soon" as const },
   { label: "Round up", state: "soon" as const },
 ];
 

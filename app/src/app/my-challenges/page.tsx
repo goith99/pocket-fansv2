@@ -49,7 +49,13 @@ export default function MyChallengesPage() {
       <div className="card p-4">
         <div className="flex items-center justify-between gap-3">
           <div>
-            <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-faint"><PiggyBank size={13} /> Saved so far</div>
+            {/* "Saved via DCA" = the vault's wSOL balance (app.savedSol), which
+                is currently the ONLY savings mechanism. When staking ships, add
+                a SECOND line here — "Saved via Staking" — reading the vault's
+                mSOL ATA balance (Marinade) alongside this one. Don't remove this
+                label back to a generic "Saved" then; the two need to be
+                distinguishable. */}
+            <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-faint"><PiggyBank size={13} /> Saved via DCA</div>
             <div className="mt-1 flex items-baseline gap-1">
               <span className="font-mono text-2xl font-bold tabular-nums text-green-deep">{app.savedSol != null ? app.savedSol.toFixed(4) : app.loadError ? "—" : "…"}</span>
               <span className="text-sm font-semibold text-muted">SOL</span>
