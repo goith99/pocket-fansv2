@@ -85,6 +85,7 @@ export default function MyChallengesPage() {
               onClaim={() => void app.claimChallenge(r.ruleId)}
               busy={app.busy}
               nowMs={nowMs}
+              matchFinished={app.isMatchFinished(r.matchId)}
             />
           ))}
           <Link href="/" className="btn-ghost mt-1 w-full"><Plus size={16} /> Create another challenge</Link>

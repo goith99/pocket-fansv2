@@ -13,6 +13,7 @@ export default function ChallengeCard({
   onClaim,
   busy,
   nowMs,
+  matchFinished,
 }: {
   challenge: RuleView;
   name: string;
@@ -23,6 +24,9 @@ export default function ChallengeCard({
   /** Current time (ms). Passed in so the card doesn't need its own clock/timer;
    * the parent re-renders periodically and/or on demand. */
   nowMs: number;
+  /** True once the fixture this rule's match_id points at is finished. Only
+   * meaningful for GoalScored rules (drives the "Expired" state). */
+  matchFinished?: boolean;
 }) {
   // Once executionsDone reaches maxExecutions, the delegation is fully spent —
   // there is nothing left to claim or to cancel. Older rules created before
@@ -39,8 +43,13 @@ export default function ChallengeCard({
   // it's a pure client-side time check mirroring the on-chain guard in
   // execute_rule.
   const claimable = !isGoal && r.isActive && !exhausted && nowMs / 1000 >= r.matchEndTs;
-  // GoalScored is still waiting for the keeper as long as it's live and unspent.
-  const goalWaiting = isGoal && r.isActive && !exhausted;
+  // A GoalScored rule is EXPIRED (dead) once the specific match it is bound to
+  // is finished but it never executed: the keeper only watches live fixtures, so
+  // it can never fire again. Bound to this rule's match_id, independent of
+  // whether the team has other/future fixtures.
+  const goalExpired = isGoal && r.isActive && !exhausted && !!matchFinished;
+  // GoalScored is still waiting for the keeper while its match hasn't finished.
+  const goalWaiting = isGoal && r.isActive && !exhausted && !matchFinished;
 
   return (
     <div className="card p-3.5">
@@ -55,11 +64,15 @@ export default function ChallengeCard({
           <div className="mt-0.5 flex items-center gap-2 text-[13px] text-muted">
             <span
               className={`inline-flex items-center gap-1 font-semibold ${
-                exhausted || r.isActive ? "text-green" : "text-faint"
+                !goalExpired && (exhausted || r.isActive) ? "text-green" : "text-faint"
               }`}
             >
-              <span className={`h-1.5 w-1.5 rounded-full ${exhausted || r.isActive ? "bg-green" : "bg-faint"}`} />
-              {exhausted ? "Completed" : r.isActive ? "Active" : "Cancelled"}
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${
+                  !goalExpired && (exhausted || r.isActive) ? "bg-green" : "bg-faint"
+                }`}
+              />
+              {exhausted ? "Completed" : goalExpired ? "Expired" : r.isActive ? "Active" : "Cancelled"}
             </span>
             <span>·</span>
             <span>saved {r.executionsDone}/{r.maxExecutions} times</span>
@@ -85,6 +98,18 @@ export default function ChallengeCard({
           <p>
             Waiting for {name} to score {r.threshold ?? 1} goal{(r.threshold ?? 1) === 1 ? "" : "s"} — a keeper
             claims this automatically the moment it happens. Nothing to tap.
+          </p>
+        </div>
+      )}
+
+      {/* GoalScored EXPIRED: the bound match finished without the threshold being
+          reached, so this rule can never fire. Owner can still cancel to tidy up. */}
+      {goalExpired && (
+        <div className="mt-3 flex items-start gap-2 rounded-xl bg-black/[0.03] px-3 py-2.5 text-[13px] leading-relaxed text-muted">
+          <Info size={15} className="mt-0.5 shrink-0 text-faint" />
+          <p>
+            Match ended — {name} didn't reach {r.threshold ?? 1} goal{(r.threshold ?? 1) === 1 ? "" : "s"} for
+            this challenge. No funds were affected; you can cancel this challenge.
           </p>
         </div>
       )}

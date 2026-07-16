@@ -347,9 +347,21 @@ export function useFanApp() {
     return teams.filter((t) => hasUpcoming.has(t.id));
   }, [teams, fixtures]);
 
+  // Is the fixture a rule is bound to already finished? Used to detect a DEAD
+  // GoalScored rule: it fires only while its own match is live (the keeper
+  // watches status='live' fixtures), so once that specific match_id is finished
+  // and the rule still hasn't executed, it can never fire again. This is about
+  // the RULE's bound match_id, NOT about whether the team has other fixtures —
+  // a team can be freshly selectable (upcoming 3rd-place match) while an old
+  // rule bound to their finished semifinal is permanently expired.
+  const isMatchFinished = useCallback(
+    (matchId: string) => fixtures.some((f) => f.fixtureId === Number(matchId) && f.status === "finished"),
+    [fixtures],
+  );
+
   return {
     ready, authenticated, login, logout, user, address,
-    sol, usdc, savedSol, teams, activeTeams, challenges, teamName,
+    sol, usdc, savedSol, teams, activeTeams, challenges, teamName, isMatchFinished,
     txState, resetTx, busy, refresh, loadError,
     createChallenge, createGoalChallenge, cancelChallenge, withdrawSavings, claimChallenge, getDevUsdc,
   };
