@@ -327,24 +327,24 @@ export function useFanApp() {
   // ParticipantId registry so finished-fixture teams still resolve (never "Team 1634").
   const teamName = useCallback((id: number) => teams.find((t) => t.id === id)?.name ?? TEAM_BY_ID[id] ?? `Team ${id}`, [teams]);
 
-  // Teams still in the tournament, for the picker. A team is eliminated once it
-  // has a FINISHED fixture with a DECISIVE result (winnerId !== 0) that it did
-  // NOT win. winnerId already accounts for knockout penalties (see Fixture.score
-  // above), so:
-  //   - group-stage draw  -> winnerId 0            -> nobody eliminated
-  //   - knockout on pens   -> winnerId = pen winner -> loser eliminated
-  //   - knockout finished but winnerId still 0 (pens not yet recorded) -> both
-  //     stay visible; erring toward showing a team, never wrongly hiding one.
+  // Teams selectable in the picker. A team is selectable iff it has at least one
+  // fixture that is still upcoming or live — i.e. a real NEXT match to attach a
+  // new challenge to (create_rule pins match_id + match_end_ts from it). That is
+  // exactly what the picker must guarantee, and it needs no elimination
+  // inference: a team knocked out has no future fixture and drops off; a team
+  // that lost a semifinal but has a 3rd-place playoff still has an upcoming
+  // fixture and stays selectable. Works for every bracket format (incl.
+  // 3rd-place playoffs) with no special-casing and no winnerId logic.
   // NOTE: only the PICKER uses this. `teams` stays the full list so teamName()
-  // still resolves an already-backed eliminated team's name.
+  // still resolves an already-backed team whose fixtures are all finished.
   const activeTeams = useMemo(() => {
-    const eliminated = new Set<number>();
+    const hasUpcoming = new Set<number>();
     for (const f of fixtures) {
-      if (f.status !== "finished" || !f.score || f.score.winnerId === 0) continue;
-      const loserId = f.score.winnerId === f.participant1.id ? f.participant2.id : f.participant1.id;
-      eliminated.add(loserId);
+      if (f.status !== "upcoming" && f.status !== "live") continue;
+      hasUpcoming.add(f.participant1.id);
+      hasUpcoming.add(f.participant2.id);
     }
-    return teams.filter((t) => !eliminated.has(t.id));
+    return teams.filter((t) => hasUpcoming.has(t.id));
   }, [teams, fixtures]);
 
   return {
