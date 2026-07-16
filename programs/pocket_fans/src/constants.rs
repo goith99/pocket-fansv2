@@ -84,3 +84,50 @@ pub const VALIDATE_STAT_V2_DISCRIMINATOR: [u8; 8] = [208, 215, 194, 214, 241, 71
 // ---------------------------------------------------------------------------
 pub const STAT_KEY_HOME_GOALS: u32 = 1;
 pub const STAT_KEY_AWAY_GOALS: u32 = 2;
+
+// ---------------------------------------------------------------------------
+// Marinade liquid staking (DEVNET) — CPI target for the SwapStakeAndSave action
+// (execute_rule_staked). Marinade uses the SAME addresses on devnet and mainnet
+// (one of the few protocols that do). Every value below was cross-checked in
+// this session against BOTH docs.marinade.finance/developers/contract-addresses
+// AND a live devnet account read (2026-07-15): the program is executable on
+// devnet, the State account is owned by the program, and State.msol_mint (read
+// from the live State bytes) equals MSOL_MINT below. Pubkey::from_str_const also
+// validates each is a well-formed 32-byte key at compile time.
+//
+// The program does NOT hardcode-trust these for the deposit itself: the accounts
+// are passed in and forwarded to the CPI; the address = constraints in
+// execute_rule_staked assert the caller wired the intended Marinade accounts
+// (defense-in-depth), mirroring how the whirlpool accounts are handled.
+// ---------------------------------------------------------------------------
+pub const MARINADE_PROGRAM_ID: Pubkey =
+    Pubkey::from_str_const("MarBmsSgKXdrN1egZf5sqe1TMai9K1rChYNDJgjq7aD");
+pub const MARINADE_STATE: Pubkey =
+    Pubkey::from_str_const("8szGkuLTAux9XMgZ2vtY39jVSowEcpBfFfD8hXSEqdGC");
+pub const MSOL_MINT: Pubkey =
+    Pubkey::from_str_const("mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So");
+pub const MARINADE_MSOL_MINT_AUTHORITY: Pubkey =
+    Pubkey::from_str_const("3JLPCS1qM2zRw3Dp6V4hZnYHd4toMNPkNesXdX9tg6KM");
+pub const MARINADE_RESERVE: Pubkey =
+    Pubkey::from_str_const("Du3Ysj1wKbxPKkuPPnvzQLQh8oMSVifs3jGZjJWXFmHN");
+pub const MARINADE_LIQ_POOL_SOL_LEG: Pubkey =
+    Pubkey::from_str_const("UefNb6z6yvArqe4cJHTXCqStRsKmWhGxnZzuHbikP5Q");
+pub const MARINADE_LIQ_POOL_MSOL_LEG: Pubkey =
+    Pubkey::from_str_const("7GgPYjS5Dza89wV6FpZ23kUJRG5vbQ1GM25ezspYFSoE");
+pub const MARINADE_LIQ_POOL_MSOL_LEG_AUTHORITY: Pubkey =
+    Pubkey::from_str_const("EyaSjUtSgo9aRD1f8LWXwdvkpDTmXAW54yoSHZRF14WL");
+
+/// Anchor sighash of Marinade's `deposit(lamports: u64)` = sha256("global:deposit")[..8].
+/// Computed independently this session and cross-checked against the program's
+/// lib.rs (the SOL-deposit handler is named `deposit`, distinct from
+/// `deposit_stake_account`).
+pub const MARINADE_DEPOSIT_DISCRIMINATOR: [u8; 8] = [242, 35, 198, 137, 82, 225, 242, 182];
+
+/// System-owned PDA that transiently holds native SOL between the wSOL unwrap
+/// and the Marinade deposit, and signs the deposit as Marinade's `transfer_from`.
+/// Seeds: ["vault_sol", owner].
+pub const VAULT_SOL_SEED: &[u8] = b"vault_sol";
+/// Ephemeral wSOL token account created + closed within a single
+/// execute_rule_staked call to unwrap the swap output into native SOL.
+/// Seeds: ["stake_wsol", owner, rule_id].
+pub const STAKE_WSOL_SEED: &[u8] = b"stake_wsol";

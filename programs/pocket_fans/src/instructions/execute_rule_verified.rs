@@ -175,6 +175,10 @@ pub fn handler(
         ActionType::SwapAndSave { amount_usdc, target_mint, max_slippage_bps } => {
             (*amount_usdc, *target_mint, *max_slippage_bps)
         }
+        // SwapStakeAndSave rules stake into Marinade via execute_rule_staked only.
+        // Reject here. Required arm — adding the ActionType variant makes this
+        // match non-exhaustive otherwise; SwapAndSave behavior unchanged.
+        ActionType::SwapStakeAndSave { .. } => return err!(PocketFansError::UnsupportedAction),
     };
     require!(target_mint == WSOL_MINT, PocketFansError::WrongMint);
 

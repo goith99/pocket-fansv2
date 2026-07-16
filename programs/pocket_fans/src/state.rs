@@ -123,6 +123,20 @@ pub enum ActionType {
         /// Max acceptable slippage in basis points (devnet default 1000-2000).
         max_slippage_bps: u16,
     },
+
+    /// Victory DCA + auto-stake: same delegated USDC pull and Orca swap to wSOL
+    /// as SwapAndSave, but the wSOL is then unwrapped to native SOL and deposited
+    /// into Marinade liquid staking, so the vault receives mSOL (a yield-bearing
+    /// SOL derivative) instead of plain wSOL. Executed ONLY by
+    /// `execute_rule_staked` (TeamWin self-claim path). Output mint is always the
+    /// Marinade mSOL mint, so there is no `target_mint` field.
+    SwapStakeAndSave {
+        /// Per-execution devUSDC pulled + swapped, in raw base units — identical
+        /// semantics to SwapAndSave.amount_usdc.
+        amount_usdc: u64,
+        /// Max acceptable slippage in basis points for the USDC->wSOL swap.
+        max_slippage_bps: u16,
+    },
     // --- reserved for later phases ---
     // Stake { amount: u64, validator: Pubkey },
 }

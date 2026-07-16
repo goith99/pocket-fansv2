@@ -144,6 +144,11 @@ pub fn handler(ctx: Context<ExecuteRule>, _rule_id: u16) -> Result<()> {
             target_mint,
             max_slippage_bps,
         } => (*amount_usdc, *target_mint, *max_slippage_bps),
+        // SwapStakeAndSave rules are executed ONLY by execute_rule_staked (they
+        // stake into Marinade). Reject them here so a stake rule can never be
+        // run as a plain swap. Required arm — adding the ActionType variant makes
+        // this match non-exhaustive otherwise; behavior for SwapAndSave unchanged.
+        ActionType::SwapStakeAndSave { .. } => return err!(PocketFansError::UnsupportedAction),
     };
     require!(target_mint == WSOL_MINT, PocketFansError::WrongMint);
 

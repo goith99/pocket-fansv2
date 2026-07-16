@@ -82,8 +82,10 @@ pub fn handler(
         PocketFansError::InvalidMatchEndTs
     );
 
-    // This phase only supports SwapAndSave; validate its fields and compute the
-    // per-execution amount used for the delegation.
+    // Validate the action's fields and compute the per-execution amount used for
+    // the delegation. Both actions delegate USDC identically; they differ only in
+    // what the later execute step does with the swapped SOL (plain wSOL vs. staked
+    // mSOL), which is not decided here.
     let amount_usdc: u64 = match &action_type {
         ActionType::SwapAndSave {
             amount_usdc,
@@ -97,6 +99,18 @@ pub fn handler(
             );
             // MVP: output must be wSOL.
             require!(*target_mint == WSOL_MINT, PocketFansError::WrongMint);
+            *amount_usdc
+        }
+        // Auto-stake variant: no target_mint (output is always Marinade mSOL).
+        ActionType::SwapStakeAndSave {
+            amount_usdc,
+            max_slippage_bps,
+        } => {
+            require!(*amount_usdc > 0, PocketFansError::InvalidAmount);
+            require!(
+                *max_slippage_bps <= MAX_SLIPPAGE_BPS,
+                PocketFansError::InvalidSlippage
+            );
             *amount_usdc
         }
     };

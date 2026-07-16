@@ -50,4 +50,12 @@ pub enum PocketFansError {
     InvalidStatLayout,
     #[msg("This instruction does not support this rule's trigger type")]
     UnsupportedTrigger,
+
+    // --- SwapStakeAndSave action (execute_rule_staked / Marinade CPI) ---
+    #[msg("Provided account does not match the expected Marinade account")]
+    WrongMarinadeAccount,
+    #[msg("Provided program is not the Marinade liquid-staking program")]
+    WrongMarinadeProgram,
+    #[msg("Swap produced no wSOL to stake")]
+    NothingToStake,
 }

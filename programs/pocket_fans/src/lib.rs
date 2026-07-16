@@ -74,6 +74,15 @@ pub mod pocket_fans {
         instructions::execute_rule_verified::handler(ctx, rule_id, payload)
     }
 
+    /// Rule OWNER ONLY (self-claim), SwapStakeAndSave action: like execute_rule,
+    /// but the swapped SOL is deposited into Marinade liquid staking so the vault
+    /// receives mSOL instead of wSOL. TeamWin trigger only; entirely separate from
+    /// execute_rule / execute_rule_verified (both untouched). See
+    /// instructions/execute_rule_staked.rs.
+    pub fn execute_rule_staked(ctx: Context<ExecuteRuleStaked>, rule_id: u16) -> Result<()> {
+        instructions::execute_rule_staked::handler(ctx, rule_id)
+    }
+
     /// User: deactivate a rule and clear its SPL delegation.
     pub fn revoke_rule(ctx: Context<RevokeRule>, rule_id: u16) -> Result<()> {
         instructions::revoke_rule::handler(ctx, rule_id)
