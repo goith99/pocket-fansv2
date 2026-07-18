@@ -9,6 +9,9 @@ import {
   PROGRAM_ID, DEVUSDC_MINT, WSOL_MINT, TOKEN_PROGRAM, SYSTEM_PROGRAM,
   WHIRLPOOL, WHIRLPOOL_PROGRAM, WHIRLPOOL_VAULT_A, WHIRLPOOL_VAULT_B,
   DISC, ACCT_DISC, MIN_SQRT_PRICE, TXORACLE_PROGRAM,
+  MSOL_MINT, MARINADE_PROGRAM, MARINADE_STATE, MARINADE_MSOL_MINT_AUTHORITY,
+  MARINADE_RESERVE, MARINADE_LIQ_POOL_SOL_LEG, MARINADE_LIQ_POOL_MSOL_LEG,
+  MARINADE_LIQ_POOL_MSOL_LEG_AUTHORITY,
 } from "./constants";
 
 // --- little-endian encoders ---
@@ -57,6 +60,13 @@ export const vaultPda = (owner: PublicKey) =>
 export const rulePda = (vault: PublicKey, ruleId: number) =>
   PublicKey.findProgramAddressSync([Buffer.from("rule"), vault.toBuffer(), u16(ruleId)], PROGRAM_ID)[0];
 export const ata = (mint: PublicKey, owner: PublicKey) => getAssociatedTokenAddressSync(mint, owner, true);
+// execute_rule_staked PDAs (mirror constants.rs seeds). vault_sol holds native
+// SOL transiently between the wSOL unwrap and the Marinade deposit; stake_wsol is
+// the ephemeral wSOL account init'd+closed within each staked claim.
+export const vaultSolPda = (owner: PublicKey) =>
+  PublicKey.findProgramAddressSync([Buffer.from("vault_sol"), owner.toBuffer()], PROGRAM_ID)[0];
+export const stakeWsolPda = (owner: PublicKey, ruleId: number) =>
+  PublicKey.findProgramAddressSync([Buffer.from("stake_wsol"), owner.toBuffer(), u16(ruleId)], PROGRAM_ID)[0];
 
 // --- instructions (user-side) ---
 export function ixInitializeVault(owner: PublicKey): TransactionInstruction {
@@ -82,11 +92,21 @@ export function ixCreateRule(args: {
   owner: PublicKey; vaultTotalRules: number; trigger: RuleTrigger;
   amountUsdc: bigint; maxSlippageBps: number; maxExecutions: number;
   matchId: bigint; matchEndTs: bigint;
+  // Which ActionType to store. Defaults to SwapAndSave (Auto DCA -> wSOL) for
+  // backward compatibility; "SwapStakeAndSave" (Auto Stake -> mSOL via Marinade)
+  // is claimed later by execute_rule_staked. Same delegated USDC amount either
+  // way — they differ only in what the claim does with the swapped SOL.
+  actionKind?: "SwapAndSave" | "SwapStakeAndSave";
 }): TransactionInstruction {
   const vault = vaultPda(args.owner);
   const rule = rulePda(vault, args.vaultTotalRules);
   const trigger = encodeTrigger(args.trigger);
-  const action = Buffer.concat([Buffer.from([0]), u64(args.amountUsdc), WSOL_MINT.toBuffer(), u16(args.maxSlippageBps)]); // SwapAndSave variant 0
+  // ActionType borsh (tag = variant index in state.rs): 0 = SwapAndSave
+  // {amount_usdc, target_mint, max_slippage_bps}; 1 = SwapStakeAndSave
+  // {amount_usdc, max_slippage_bps} — NOTE: variant 1 has NO target_mint.
+  const action = (args.actionKind ?? "SwapAndSave") === "SwapStakeAndSave"
+    ? Buffer.concat([u8(1), u64(args.amountUsdc), u16(args.maxSlippageBps)])
+    : Buffer.concat([u8(0), u64(args.amountUsdc), WSOL_MINT.toBuffer(), u16(args.maxSlippageBps)]);
   const data = Buffer.concat([
     disc(DISC.create_rule), trigger, action, u16(args.maxExecutions),
     u64(args.matchId), i64(args.matchEndTs),
@@ -161,6 +181,59 @@ export function ixExecuteRuleSelfClaim(args: {
       m(args.whirlpoolOracle, false, true),
       m(WHIRLPOOL_PROGRAM, false, false),
       m(TOKEN_PROGRAM, false, false),
+    ],
+    data,
+  });
+}
+
+// ===========================================================================
+// execute_rule_staked — SwapStakeAndSave (TeamWin self-claim, Auto Stake -> mSOL)
+// ===========================================================================
+// Owner-signed self-claim (same trust model as ixExecuteRuleSelfClaim): pulls
+// the owner's USDC via delegation, swaps to wSOL, unwraps to native SOL, and
+// deposits into Marinade so the vault receives mSOL. 28 accounts, order mirrors
+// ExecuteRuleStaked in programs/pocket_fans/src/instructions/execute_rule_staked.rs
+// EXACTLY (re-verified against target/idl/pocket_fans.json). Marinade addresses
+// come from constants.ts and are re-asserted on-chain.
+export function ixExecuteRuleStaked(args: {
+  owner: PublicKey; ruleId: number;
+  tickArray0: PublicKey; tickArray1: PublicKey; tickArray2: PublicKey;
+  whirlpoolOracle: PublicKey;
+}): TransactionInstruction {
+  const vault = vaultPda(args.owner);
+  const rule = rulePda(vault, args.ruleId);
+  const data = Buffer.concat([disc(DISC.execute_rule_staked), u16(args.ruleId)]);
+  return new TransactionInstruction({
+    programId: PROGRAM_ID,
+    keys: [
+      m(args.owner, true, true),                          //  0 owner (signer)
+      m(vault, false, false),                             //  1 vault
+      m(rule, false, true),                               //  2 rule
+      m(DEVUSDC_MINT, false, false),                      //  3 usdc_mint
+      m(WSOL_MINT, false, false),                         //  4 wsol_mint
+      m(MSOL_MINT, false, true),                          //  5 msol_mint
+      m(ata(DEVUSDC_MINT, args.owner), false, true),      //  6 owner_usdc_ata
+      m(ata(DEVUSDC_MINT, vault), false, true),           //  7 vault_usdc_ata
+      m(stakeWsolPda(args.owner, args.ruleId), false, true), // 8 stake_wsol (PDA, init'd)
+      m(vaultSolPda(args.owner), false, true),            //  9 vault_sol (PDA)
+      m(ata(MSOL_MINT, vault), false, true),              // 10 vault_msol_ata
+      m(WHIRLPOOL, false, true),                          // 11 whirlpool
+      m(WHIRLPOOL_VAULT_A, false, true),                  // 12 whirlpool_token_vault_a
+      m(WHIRLPOOL_VAULT_B, false, true),                  // 13 whirlpool_token_vault_b
+      m(args.tickArray0, false, true),                    // 14 tick_array_0
+      m(args.tickArray1, false, true),                    // 15 tick_array_1
+      m(args.tickArray2, false, true),                    // 16 tick_array_2
+      m(args.whirlpoolOracle, false, true),               // 17 whirlpool_oracle
+      m(WHIRLPOOL_PROGRAM, false, false),                 // 18 whirlpool_program
+      m(MARINADE_STATE, false, true),                     // 19 marinade_state
+      m(MARINADE_LIQ_POOL_SOL_LEG, false, true),          // 20 marinade_liq_pool_sol_leg
+      m(MARINADE_LIQ_POOL_MSOL_LEG, false, true),         // 21 marinade_liq_pool_msol_leg
+      m(MARINADE_LIQ_POOL_MSOL_LEG_AUTHORITY, false, false), // 22 ..._authority
+      m(MARINADE_RESERVE, false, true),                   // 23 marinade_reserve
+      m(MARINADE_MSOL_MINT_AUTHORITY, false, false),      // 24 marinade_msol_mint_authority
+      m(MARINADE_PROGRAM, false, false),                  // 25 marinade_program
+      m(TOKEN_PROGRAM, false, false),                     // 26 token_program
+      m(SYSTEM_PROGRAM, false, false),                    // 27 system_program
     ],
     data,
   });
@@ -293,69 +366,73 @@ export interface RuleView {
   maxExecutions: number; executionsDone: number; isActive: boolean;
   /** "TeamWin" (self-claim) or "GoalScored" (keeper + oracle). */
   triggerKind: "TeamWin" | "GoalScored";
+  /** "SwapAndSave" (Auto DCA -> wSOL) or "SwapStakeAndSave" (Auto Stake -> mSOL,
+   *  claimed via execute_rule_staked). Decides claim path AND the byte layout of
+   *  every field after the action (SwapStakeAndSave has no target_mint). */
+  actionKind: "SwapAndSave" | "SwapStakeAndSave";
   /** GoalScored only — the proven stat and the value it must reach. */
   statKey: number | null; threshold: number | null;
 }
 
 // Layout — see programs/pocket_fans/src/state.rs Rule.
 //
-// TriggerType is a BORSH-TAGGED ENUM = VARIABLE LENGTH, so every field after
-// `trigger_type` sits at a DIFFERENT offset per variant:
-//   TeamWin    { team_id }                      -> 1 + 4 = 5 bytes
-//   GoalScored { team_id, stat_key, threshold } -> 1 + 9 = 10 bytes
+// BOTH trigger_type AND action_type are BORSH-TAGGED ENUMS = VARIABLE LENGTH, so
+// every field after them shifts by variant. Offsets must be computed from the
+// two tags, not hard-coded — a static table for one combo misreads the others
+// (this bit us: a SwapStakeAndSave rule is 32 bytes shorter than SwapAndSave
+// because it has no target_mint, so its match_id/end_ts/counters all sit earlier).
 //
-// DO NOT check for an exact byte length here. Anchor allocates every Rule at
-// the MAX variant size, so since GoalScored was added, BOTH variants allocate
-// 141 bytes (a TeamWin rule serializes to 136 and leaves 5 trailing zeros),
-// while rules created before that change are still 136 bytes on devnet. An
-// `=== 136` check silently drops every rule created after the upgrade.
+//   TriggerType size:  TeamWin{team_id}=5   GoalScored{team_id,stat_key,threshold}=10
+//   ActionType  size:  SwapAndSave{amount,target_mint,slippage}=43
+//                      SwapStakeAndSave{amount,slippage}=11   (NO target_mint)
 //
-//                        TeamWin    GoalScored
-//   disc        0..8       yes         yes
-//   vault(32)   8..40      yes         yes
-//   rule_id     40..42     yes         yes
-//   trigger tag 42         0           1
-//     team_id   43..47     43..47      43..47
-//     stat_key  --         --          47..51
-//     threshold --         --          51
-//   action tag             47          52
-//     amount_usdc          48..56      53..61
-//     target_mint(32)      56..88      61..93
-//     slippage_bps         88..90      93..95
-//   match_id               90..98      95..103
-//   match_end_ts           98..106     103..111
-//   max_executions         106..108    111..113
-//   executions_done        108..110    113..115
-//   is_active              110         115
-//   bump                   111         116
-//   reserved(24)           112..136    117..141
-const TEAM_WIN_OFF   = { amt: 48, slip: 88, mid: 90, endTs: 98,  max: 106, done: 108, act: 110, actionTag: 47 } as const;
-const GOAL_SCORED_OFF = { amt: 53, slip: 93, mid: 95, endTs: 103, max: 111, done: 113, act: 115, actionTag: 52 } as const;
-
+//   fixed head:  disc 0..8 | vault 8..40 | rule_id 40..42
+//   trigger tag at 42; team_id at 43..47 (both); stat_key 47..51 + threshold 51 (GoalScored)
+//   action tag at (42 + triggerSize); amount_usdc right after it; slippage after
+//     the optional 32-byte target_mint; then match_id, match_end_ts,
+//     max_executions, executions_done, is_active follow the action.
+//
+// DO NOT check for an exact byte length: Anchor allocates every Rule at the MAX
+// combined size (141 B), so shorter variants leave trailing zeros; older
+// TeamWin-only rules on devnet are still 136 B. Validate against the computed
+// layout end instead.
 export function decodeRule(pubkey: PublicKey, data: Buffer): RuleView | null {
   if (data.length < 136 || !data.subarray(0, 8).equals(Buffer.from(ACCT_DISC.Rule))) return null;
+
   const triggerTag = data[42];
-  if (triggerTag !== 0 && triggerTag !== 1) return null; // unknown/newer variant — don't misread it
+  if (triggerTag !== 0 && triggerTag !== 1) return null; // unknown/newer trigger — don't misread it
   const isGoal = triggerTag === 1;
-  if (isGoal && data.length < 141) return null; // truncated GoalScored account
-  const O = isGoal ? GOAL_SCORED_OFF : TEAM_WIN_OFF;
-  const actionTag = data[O.actionTag]; // 0 = SwapAndSave (only variant)
+  const triggerSize = isGoal ? 10 : 5;
+
+  const actionTagOff = 42 + triggerSize; // 47 (TeamWin) or 52 (GoalScored)
+  const actionTag = data[actionTagOff];
+  if (actionTag !== 0 && actionTag !== 1) return null; // unknown/newer action — don't misread it
+  const isStake = actionTag === 1;
+  const actionSize = isStake ? 11 : 43; // SwapStakeAndSave has no 32-byte target_mint
+
+  const amtOff = actionTagOff + 1;
+  const slipOff = amtOff + 8 + (isStake ? 0 : 32); // skip target_mint only for SwapAndSave
+  const afterAction = actionTagOff + actionSize; // first byte after action_type
+  const midOff = afterAction, endTsOff = afterAction + 8;
+  const maxOff = afterAction + 16, doneOff = afterAction + 18, actOff = afterAction + 20;
+  if (data.length < actOff + 1) return null; // truncated for this variant
 
   return {
     pubkey: pubkey.toBase58(),
     vault: new PublicKey(data.subarray(8, 40)).toBase58(),
     ruleId: data.readUInt16LE(40),
     triggerKind: isGoal ? "GoalScored" : "TeamWin",
-    teamId: data.readUInt32LE(43), // same offset in both variants
+    actionKind: isStake ? "SwapStakeAndSave" : "SwapAndSave",
+    teamId: data.readUInt32LE(43), // same offset in both triggers
     statKey: isGoal ? data.readUInt32LE(47) : null,
     threshold: isGoal ? data[51] : null,
-    amountUsdc: actionTag === 0 ? data.readBigUInt64LE(O.amt).toString() : null,
-    maxSlippageBps: actionTag === 0 ? data.readUInt16LE(O.slip) : null,
-    matchId: data.readBigUInt64LE(O.mid).toString(),
-    matchEndTs: Number(data.readBigInt64LE(O.endTs)),
-    maxExecutions: data.readUInt16LE(O.max),
-    executionsDone: data.readUInt16LE(O.done),
-    isActive: data[O.act] === 1,
+    amountUsdc: data.readBigUInt64LE(amtOff).toString(), // present in both actions
+    maxSlippageBps: data.readUInt16LE(slipOff),          // present in both actions
+    matchId: data.readBigUInt64LE(midOff).toString(),
+    matchEndTs: Number(data.readBigInt64LE(endTsOff)),
+    maxExecutions: data.readUInt16LE(maxOff),
+    executionsDone: data.readUInt16LE(doneOff),
+    isActive: data[actOff] === 1,
   };
 }
 

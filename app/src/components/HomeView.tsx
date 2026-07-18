@@ -12,13 +12,7 @@ const WHEN = [
   { label: "Corner", state: "soon" as const },
   { label: "Yellow card", state: "soon" as const },
 ];
-const THEN = [
-  { label: "Auto DCA", state: "active" as const },
-  // "Auto Stake" stays "soon" — the underlying Marinade staking action is not
-  // built yet; this is a label only.
-  { label: "Auto Stake", state: "soon" as const },
-  { label: "Round up", state: "soon" as const },
-];
+export type SaveAction = "dca" | "stake";
 
 function Chip({ label, state }: { label: string; state: "active" | "soon" }) {
   if (state === "soon") {
@@ -34,6 +28,22 @@ function Chip({ label, state }: { label: string; state: "active" | "soon" }) {
       <Check size={14} strokeWidth={3} className="text-green" />
       {label}
     </div>
+  );
+}
+
+// The "Then save" action is now a real choice (Auto DCA -> wSOL, Auto Stake ->
+// mSOL). Selectable chip: green/checked when picked, idle otherwise.
+function SelectableChip({ label, selected, onClick }: { label: string; selected: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={selected}
+      className={`chip ${selected ? "chip-active" : "chip-idle"} transition active:scale-[0.98]`}
+    >
+      {selected && <Check size={14} strokeWidth={3} className="text-green" />}
+      {label}
+    </button>
   );
 }
 
@@ -78,6 +88,7 @@ function SavedCard({ value, celebrate }: { value: string; celebrate: boolean }) 
 export default function HomeView({
   greetingName, balanceUsd, savedSol, selectedTeam, amount, onAmountChange, onOpenPicker, onCreate, creating, challenges, teamName, celebrate, loadError, onRetry,
   solBalance, faucetSolAmount, onFaucetSolAmountChange, onGetDevUsdc, faucetBusy,
+  saveAction, onSaveActionChange,
 }: {
   greetingName: string;
   balanceUsd: number | null;
@@ -88,6 +99,8 @@ export default function HomeView({
   onOpenPicker: () => void;
   onCreate: () => void;
   creating: boolean;
+  saveAction: SaveAction;
+  onSaveActionChange: (a: SaveAction) => void;
   challenges: RuleView[];
   teamName: (id: number) => string;
   celebrate: boolean;
@@ -167,8 +180,15 @@ export default function HomeView({
 
         <div className="label mb-2 mt-4">Then save</div>
         <div className="grid grid-cols-3 gap-2">
-          {THEN.map((c) => <Chip key={c.label} {...c} />)}
+          <SelectableChip label="Auto DCA" selected={saveAction === "dca"} onClick={() => onSaveActionChange("dca")} />
+          <SelectableChip label="Auto Stake" selected={saveAction === "stake"} onClick={() => onSaveActionChange("stake")} />
+          <Chip label="Round up" state="soon" />
         </div>
+        <p className="mt-1.5 text-[13px] text-muted">
+          {saveAction === "stake"
+            ? "Your winnings are staked into SOL (mSOL) — earns staking yield while saved."
+            : "Your winnings are swapped into SOL and set aside in your vault."}
+        </p>
 
         <div className="mt-2.5 flex items-center gap-3">
           <div className="relative w-32">

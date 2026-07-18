@@ -1,4 +1,4 @@
-import { Goal, Info, PartyPopper } from "lucide-react";
+import { Goal, Info, PartyPopper, Coins } from "lucide-react";
 import TeamFlag from "./TeamFlag";
 import type { RuleView } from "@/lib/pf";
 import type { ChallengeNote } from "@/lib/useChallengeNotes";
@@ -38,6 +38,10 @@ export default function ChallengeCard({
   // rejects them from execute_rule outright. So the whole time-based claim flow
   // below is TeamWin-only.
   const isGoal = r.triggerKind === "GoalScored";
+  // SwapStakeAndSave rules save into mSOL (Marinade) instead of wSOL; the copy
+  // below reflects that. Claim routing (execute_rule_staked vs execute_rule) is
+  // handled by the parent via r.actionKind.
+  const isStake = r.actionKind === "SwapStakeAndSave";
   // SELF-CLAIM MODEL (TeamWin only): claimable once the fixture's match_end_ts
   // has passed and there's still capacity left. No oracle/admin decides this —
   // it's a pure client-side time check mirroring the on-chain guard in
@@ -59,8 +63,13 @@ export default function ChallengeCard({
           <div className="font-display text-lg font-semibold leading-tight tracking-wide">
             {isGoal
               ? `${name} scores ${r.threshold ?? 1}+ → save $${(Number(r.amountUsdc) / 1e6).toFixed(2)}`
-              : `${name} wins → save $${(Number(r.amountUsdc) / 1e6).toFixed(2)}`}
+              : `${name} wins → ${isStake ? "stake" : "save"} $${(Number(r.amountUsdc) / 1e6).toFixed(2)}`}
           </div>
+          {isStake && (
+            <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-green-tint px-2 py-0.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-green-deep">
+              <Coins size={11} /> Auto Stake · mSOL
+            </div>
+          )}
           <div className="mt-0.5 flex items-center gap-2 text-[13px] text-muted">
             <span
               className={`inline-flex items-center gap-1 font-semibold ${
@@ -119,7 +128,7 @@ export default function ChallengeCard({
       {claimable && (
         <div className="mt-3 flex items-start gap-2 rounded-xl bg-green-tint px-3 py-2.5 text-[13px] leading-relaxed text-green-deep">
           <PartyPopper size={15} className="mt-0.5 shrink-0" />
-          <p>Match day has passed for this challenge — tap <b>Start Saving</b> to move your savings now.</p>
+          <p>Match day has passed for this challenge — tap <b>Start Saving</b> to {isStake ? "stake your savings into SOL now" : "move your savings now"}.</p>
         </div>
       )}
 

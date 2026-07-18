@@ -88,7 +88,10 @@ export default function MyChallengesPage() {
               name={app.teamName(r.teamId ?? 0)}
               note={notes[r.teamId ?? -1]}
               onCancel={() => void app.cancelChallenge(r.ruleId)}
-              onClaim={() => void app.claimChallenge(r.ruleId)}
+              onClaim={() => {
+                if (r.actionKind === "SwapStakeAndSave") void app.claimStakeChallenge(r.ruleId);
+                else void app.claimChallenge(r.ruleId);
+              }}
               busy={app.busy}
               nowMs={nowMs}
               matchFinished={app.isMatchFinished(r.matchId)}

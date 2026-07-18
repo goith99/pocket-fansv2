@@ -15,12 +15,12 @@ import { usePrivy, useSolanaWallets } from "@privy-io/react-auth";
 import { Connection, PublicKey, Transaction, TransactionInstruction, ComputeBudgetProgram } from "@solana/web3.js";
 import { createAssociatedTokenAccountIdempotentInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token";
 import {
-  DEVUSDC_MINT, WSOL_MINT, DEVUSDC_DECIMALS, DEFAULT_MAX_EXECUTIONS, DEFAULT_MAX_SLIPPAGE_BPS,
+  DEVUSDC_MINT, WSOL_MINT, MSOL_MINT, DEVUSDC_DECIMALS, DEFAULT_MAX_EXECUTIONS, DEFAULT_MAX_SLIPPAGE_BPS,
   MATCH_END_BUFFER_SECS, STAT_KEY_HOME_GOALS, STAT_KEY_AWAY_GOALS, WITHDRAW_FLOOR_BUFFER_BPS,
 } from "@/lib/constants";
 import {
   vaultPda, ata, ixInitializeVault, ixCreateRule, ixRevokeRule, ixWithdrawWsol,
-  ixExecuteRuleSelfClaim, ticksForBToA, getUserVault, getUserRules, tokenUiBalance, RuleView,
+  ixExecuteRuleSelfClaim, ixExecuteRuleStaked, ticksForBToA, getUserVault, getUserRules, tokenUiBalance, RuleView,
   ixWrapSol, ixSyncNative, ixSwapSolToUsdc, ticksForAToB, estimateUsdcOut, estimateWsolOut,
 } from "@/lib/pf";
 import { TEAM_BY_ID } from "@/lib/flags";
@@ -182,6 +182,49 @@ export function useFanApp() {
     return sig;
   }, [address, connection, fixtures, refresh, run]);
 
+  // AUTO STAKE (SwapStakeAndSave). A deliberate SIBLING of createChallenge, not a
+  // flag on it — same TeamWin self-claim trust model and same delegated USDC
+  // amount, but the rule's action is SwapStakeAndSave (claimed later by
+  // execute_rule_staked -> mSOL via Marinade) instead of SwapAndSave (-> wSOL).
+  // Pre-creates the vault's USDC + mSOL ATAs (execute_rule_staked deposits mSOL
+  // into vault_msol_ata; it uses an ephemeral stake_wsol PDA for the swap, so no
+  // vault wSOL ATA is needed here — unlike createChallenge).
+  const createStakeChallenge = useCallback(async (teamId: number, amountStr: string) => {
+    if (!address) return null;
+    const owner = new PublicKey(address);
+    const amountUsdc = BigInt(Math.round(Number(amountStr) * 10 ** DEVUSDC_DECIMALS));
+    const sig = await run("Setting up your staking challenge", async (onSent) => {
+      if (amountUsdc <= 0n) throw new Error("Enter an amount greater than 0");
+      const fixture = nextFixtureForTeam(teamId);
+      if (!fixture) throw new Error("No scheduled match found for this team yet");
+      const matchId = BigInt(fixture.fixtureId);
+      const matchEndTs = BigInt(Math.floor(fixture.startTime / 1000) + MATCH_END_BUFFER_SECS);
+
+      const ixs: TransactionInstruction[] = [];
+      const uv = await getUserVault(connection, owner);
+      if (!uv.exists) ixs.push(ixInitializeVault(owner));
+      const usdcAta = getAssociatedTokenAddressSync(DEVUSDC_MINT, owner);
+      if (!(await connection.getAccountInfo(usdcAta))) {
+        ixs.push(createAssociatedTokenAccountIdempotentInstruction(owner, usdcAta, owner, DEVUSDC_MINT));
+      }
+      const vault = vaultPda(owner);
+      for (const mint of [DEVUSDC_MINT, MSOL_MINT]) {
+        const vaultAta = ata(mint, vault);
+        if (!(await connection.getAccountInfo(vaultAta))) {
+          ixs.push(createAssociatedTokenAccountIdempotentInstruction(owner, vaultAta, vault, mint));
+        }
+      }
+      ixs.push(ixCreateRule({
+        owner, vaultTotalRules: uv.totalRules, trigger: { kind: "TeamWin", teamId },
+        amountUsdc, maxSlippageBps: DEFAULT_MAX_SLIPPAGE_BPS, maxExecutions: DEFAULT_MAX_EXECUTIONS,
+        matchId, matchEndTs, actionKind: "SwapStakeAndSave",
+      }));
+      return submit(ixs, onSent);
+    });
+    if (sig) await refresh();
+    return sig;
+  }, [address, connection, fixtures, refresh, run]);
+
   // GOALSCORED (keeper + oracle). A deliberate SIBLING of createChallenge rather
   // than a flag on it: the TeamWin path above stays byte-for-byte unchanged, the
   // args differ (threshold), and the resulting rule is claimed through a
@@ -295,6 +338,37 @@ export function useFanApp() {
     return sig;
   }, [address, connection, challenges, refresh, run]);
 
+  // AUTO STAKE self-claim (execute_rule_staked): sibling of claimChallenge for
+  // SwapStakeAndSave rules. Swaps USDC->wSOL, unwraps to SOL, deposits into
+  // Marinade -> mSOL in the vault. Per cut-order #1 there is NO chained withdraw
+  // here: the mSOL stays in the vault and is collected via the Withdraw control
+  // (mSOL withdraw generalization is a later cut item). The 28-account wiring is
+  // validated read-only against live state; the deposit-execution path is proven
+  // by the live checkpoint against a real staking rule.
+  const claimStakeChallenge = useCallback(async (ruleId: number) => {
+    if (!address) return null;
+    const owner = new PublicKey(address);
+    const sig = await run("Claiming your staked savings", async (onSent) => {
+      const { ta0, ta1, ta2, whirlpoolOracle } = await ticksForBToA(connection);
+      // execute_rule_staked runs the Orca swap CPI AND the Marinade deposit CPI,
+      // plus an ephemeral account init — well past the 200k default.
+      const ixs: TransactionInstruction[] = [
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 700_000 }),
+      ];
+      // vault mSOL ATA (Marinade mint_to dest) is normally pre-created at
+      // challenge creation; recreate idempotently in case it's missing.
+      const vault = vaultPda(owner);
+      const vaultMsol = ata(MSOL_MINT, vault);
+      if (!(await connection.getAccountInfo(vaultMsol))) {
+        ixs.push(createAssociatedTokenAccountIdempotentInstruction(owner, vaultMsol, vault, MSOL_MINT));
+      }
+      ixs.push(ixExecuteRuleStaked({ owner, ruleId, tickArray0: ta0, tickArray1: ta1, tickArray2: ta2, whirlpoolOracle }));
+      return submit(ixs, onSent);
+    });
+    if (sig) await refresh();
+    return sig;
+  }, [address, connection, refresh, run]);
+
   const withdrawSavings = useCallback(async () => {
     if (!address) return null;
     const owner = new PublicKey(address);
@@ -391,6 +465,6 @@ export function useFanApp() {
     ready, authenticated, login, logout, user, address,
     sol, usdc, savedSol, teams, activeTeams, challenges, teamName, isMatchFinished,
     txState, resetTx, busy, refresh, loadError,
-    createChallenge, createGoalChallenge, cancelChallenge, withdrawSavings, claimChallenge, getDevUsdc,
+    createChallenge, createStakeChallenge, createGoalChallenge, cancelChallenge, withdrawSavings, claimChallenge, claimStakeChallenge, getDevUsdc,
   };
 }

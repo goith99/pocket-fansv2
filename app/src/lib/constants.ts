@@ -31,7 +31,24 @@ export const DISC = {
   withdraw_from_vault: [180, 34, 37, 46, 156, 0, 211, 238],
   execute_rule: [143, 36, 13, 104, 240, 240, 207, 192],
   execute_rule_verified: [109, 158, 73, 235, 69, 145, 96, 155],
+  execute_rule_staked: [230, 120, 146, 64, 213, 216, 43, 197],
 } as const;
+
+// --- Marinade liquid staking (DEVNET) — accounts forwarded to execute_rule_staked ---
+// Mirrors programs/pocket_fans/src/constants.rs EXACTLY (values cross-checked
+// against a live devnet read there). The program re-asserts every one of these
+// with address = / require_keys_eq! in-instruction, so a wrong value here fails
+// loudly on-chain rather than misrouting funds. Marinade uses the same addresses
+// on devnet and mainnet.
+export const MSOL_MINT = new PublicKey("mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So"); // 9 dp
+export const MSOL_DECIMALS = 9;
+export const MARINADE_PROGRAM = new PublicKey("MarBmsSgKXdrN1egZf5sqe1TMai9K1rChYNDJgjq7aD");
+export const MARINADE_STATE = new PublicKey("8szGkuLTAux9XMgZ2vtY39jVSowEcpBfFfD8hXSEqdGC");
+export const MARINADE_MSOL_MINT_AUTHORITY = new PublicKey("3JLPCS1qM2zRw3Dp6V4hZnYHd4toMNPkNesXdX9tg6KM");
+export const MARINADE_RESERVE = new PublicKey("Du3Ysj1wKbxPKkuPPnvzQLQh8oMSVifs3jGZjJWXFmHN");
+export const MARINADE_LIQ_POOL_SOL_LEG = new PublicKey("UefNb6z6yvArqe4cJHTXCqStRsKmWhGxnZzuHbikP5Q");
+export const MARINADE_LIQ_POOL_MSOL_LEG = new PublicKey("7GgPYjS5Dza89wV6FpZ23kUJRG5vbQ1GM25ezspYFSoE");
+export const MARINADE_LIQ_POOL_MSOL_LEG_AUTHORITY = new PublicKey("EyaSjUtSgo9aRD1f8LWXwdvkpDTmXAW54yoSHZRF14WL");
 
 // --- TxODDS Txoracle (devnet) — CPI target for the GoalScored trigger ---
 // Mirrors programs/pocket_fans/src/constants.rs TXORACLE_PROGRAM_ID.

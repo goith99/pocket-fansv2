@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { useFanApp } from "@/lib/useFanApp";
-import HomeView from "./HomeView";
+import HomeView, { type SaveAction } from "./HomeView";
 import TeamPickerSheet from "./TeamPickerSheet";
 import TransactionFlow from "./TransactionFlow";
 import LandingPage from "./LandingPage";
@@ -18,6 +18,7 @@ export default function UserDashboard() {
   const app = useFanApp();
   const [teamId, setTeamId] = useState<number | "">("");
   const [amount, setAmount] = useState("1.00");
+  const [saveAction, setSaveAction] = useState<SaveAction>("dca");
   const [faucetSolAmount, setFaucetSolAmount] = useState("0.1");
   const [pickerOpen, setPickerOpen] = useState(false);
   const [celebrate, setCelebrate] = useState(false);
@@ -51,8 +52,14 @@ export default function UserDashboard() {
         amount={amount}
         onAmountChange={setAmount}
         onOpenPicker={() => setPickerOpen(true)}
-        onCreate={() => { if (teamId !== "") void app.createChallenge(Number(teamId), amount); }}
+        onCreate={() => {
+          if (teamId === "") return;
+          if (saveAction === "stake") void app.createStakeChallenge(Number(teamId), amount);
+          else void app.createChallenge(Number(teamId), amount);
+        }}
         creating={app.busy}
+        saveAction={saveAction}
+        onSaveActionChange={setSaveAction}
         challenges={app.challenges}
         teamName={app.teamName}
         celebrate={celebrate}
