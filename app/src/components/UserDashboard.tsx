@@ -48,6 +48,7 @@ export default function UserDashboard() {
         greetingName={firstName(app.user)}
         balanceUsd={app.usdc}
         savedSol={app.savedSol}
+        savedMsol={app.savedMsol}
         selectedTeam={selectedTeam}
         amount={amount}
         onAmountChange={setAmount}

@@ -19,7 +19,7 @@ import {
   MATCH_END_BUFFER_SECS, STAT_KEY_HOME_GOALS, STAT_KEY_AWAY_GOALS, WITHDRAW_FLOOR_BUFFER_BPS,
 } from "@/lib/constants";
 import {
-  vaultPda, ata, ixInitializeVault, ixCreateRule, ixRevokeRule, ixWithdrawWsol,
+  vaultPda, ata, ixInitializeVault, ixCreateRule, ixRevokeRule, ixWithdrawFromVault,
   ixExecuteRuleSelfClaim, ixExecuteRuleStaked, ticksForBToA, getUserVault, getUserRules, tokenUiBalance, RuleView,
   ixWrapSol, ixSyncNative, ixSwapSolToUsdc, ticksForAToB, estimateUsdcOut, estimateWsolOut,
 } from "@/lib/pf";
@@ -60,6 +60,7 @@ export function useFanApp() {
   const [sol, setSol] = useState<number | null>(null);
   const [usdc, setUsdc] = useState<number | null>(null);
   const [savedSol, setSavedSol] = useState<number | null>(null);
+  const [savedMsol, setSavedMsol] = useState<number | null>(null);
   const [challenges, setChallenges] = useState<RuleView[]>([]);
   const [loadError, setLoadError] = useState(false);
 
@@ -77,16 +78,18 @@ export function useFanApp() {
     if (!address) return;
     try {
       const owner = new PublicKey(address);
-      const [lam, u, v] = await Promise.all([
+      const [lam, u, v, mv] = await Promise.all([
         connection.getBalance(owner),
         tokenUiBalance(connection, DEVUSDC_MINT, owner),
         tokenUiBalance(connection, WSOL_MINT, vaultPda(owner)),
+        tokenUiBalance(connection, MSOL_MINT, vaultPda(owner)),
       ]);
       const uv = await getUserVault(connection, owner);
       const rules = await getUserRules(connection, owner, uv.totalRules);
       setSol(lam / 1e9);
       setUsdc(u?.ui ?? 0);
       setSavedSol(v?.ui ?? 0);
+      setSavedMsol(mv?.ui ?? 0);
       setChallenges(rules);
       setLoadError(false);
     } catch {
@@ -330,7 +333,7 @@ export function useFanApp() {
         const preBal = (await tokenUiBalance(connection, WSOL_MINT, vault))?.raw ?? 0n;
         const floor = await estimateWsolOut(connection, BigInt(rule.amountUsdc), WITHDRAW_FLOOR_BUFFER_BPS);
         const withdrawAmt = preBal + floor;
-        if (withdrawAmt > 0n) ixs.push(ixWithdrawWsol(owner, withdrawAmt));
+        if (withdrawAmt > 0n) ixs.push(ixWithdrawFromVault(owner, WSOL_MINT, withdrawAmt));
       }
       return submit(ixs, onSent);
     });
@@ -381,7 +384,31 @@ export function useFanApp() {
       if (!(await connection.getAccountInfo(ownerWsol))) {
         ixs.push(createAssociatedTokenAccountIdempotentInstruction(owner, ownerWsol, owner, WSOL_MINT));
       }
-      ixs.push(ixWithdrawWsol(owner, bal.raw));
+      ixs.push(ixWithdrawFromVault(owner, WSOL_MINT, bal.raw));
+      return submit(ixs, onSent);
+    });
+    if (sig) await refresh();
+    return sig;
+  }, [address, connection, refresh, run]);
+
+  // Withdraw staked mSOL (Auto Stake) from the vault to the owner's wallet.
+  // Sibling of withdrawSavings; the on-chain withdraw_from_vault is mint-generic,
+  // so this is the same shape with MSOL_MINT. mSOL is a normal SPL token, so it
+  // lands as mSOL in the owner's wallet (no unwrap — mSOL is the yield-bearing
+  // asset the user is holding).
+  const withdrawStakedSavings = useCallback(async () => {
+    if (!address) return null;
+    const owner = new PublicKey(address);
+    const vault = vaultPda(owner);
+    const sig = await run("Withdrawing your staked savings", async (onSent) => {
+      const bal = await tokenUiBalance(connection, MSOL_MINT, vault);
+      if (!bal || bal.raw <= 0n) throw new Error("No staked savings to withdraw yet");
+      const ixs: TransactionInstruction[] = [];
+      const ownerMsol = ata(MSOL_MINT, owner);
+      if (!(await connection.getAccountInfo(ownerMsol))) {
+        ixs.push(createAssociatedTokenAccountIdempotentInstruction(owner, ownerMsol, owner, MSOL_MINT));
+      }
+      ixs.push(ixWithdrawFromVault(owner, MSOL_MINT, bal.raw));
       return submit(ixs, onSent);
     });
     if (sig) await refresh();
@@ -463,8 +490,8 @@ export function useFanApp() {
 
   return {
     ready, authenticated, login, logout, user, address,
-    sol, usdc, savedSol, teams, activeTeams, challenges, teamName, isMatchFinished,
+    sol, usdc, savedSol, savedMsol, teams, activeTeams, challenges, teamName, isMatchFinished,
     txState, resetTx, busy, refresh, loadError,
-    createChallenge, createStakeChallenge, createGoalChallenge, cancelChallenge, withdrawSavings, claimChallenge, claimStakeChallenge, getDevUsdc,
+    createChallenge, createStakeChallenge, createGoalChallenge, cancelChallenge, withdrawSavings, withdrawStakedSavings, claimChallenge, claimStakeChallenge, getDevUsdc,
   };
 }

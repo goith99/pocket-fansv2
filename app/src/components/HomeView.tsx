@@ -59,7 +59,7 @@ function BalanceCard({ label, icon, value, unit }: { label: string; icon: React.
   );
 }
 
-function SavedCard({ value, celebrate }: { value: string; celebrate: boolean }) {
+function SavedCard({ value, celebrate, stakedMsol }: { value: string; celebrate: boolean; stakedMsol?: number | null }) {
   return (
     <div className={`card relative overflow-hidden p-4 ${celebrate ? "animate-pop-in ring-2 ring-gold" : ""}`}>
       {celebrate && (
@@ -81,18 +81,22 @@ function SavedCard({ value, celebrate }: { value: string; celebrate: boolean }) 
         <span className="font-mono text-[26px] font-bold tabular-nums text-green-deep">{value}</span>
         <span className="text-sm font-semibold text-muted">SOL</span>
       </div>
+      {stakedMsol != null && stakedMsol > 0 && (
+        <div className="mt-0.5 text-[11px] font-semibold text-muted">+ {stakedMsol.toFixed(4)} mSOL staked</div>
+      )}
     </div>
   );
 }
 
 export default function HomeView({
-  greetingName, balanceUsd, savedSol, selectedTeam, amount, onAmountChange, onOpenPicker, onCreate, creating, challenges, teamName, celebrate, loadError, onRetry,
+  greetingName, balanceUsd, savedSol, savedMsol, selectedTeam, amount, onAmountChange, onOpenPicker, onCreate, creating, challenges, teamName, celebrate, loadError, onRetry,
   solBalance, faucetSolAmount, onFaucetSolAmountChange, onGetDevUsdc, faucetBusy,
   saveAction, onSaveActionChange,
 }: {
   greetingName: string;
   balanceUsd: number | null;
   savedSol: number | null;
+  savedMsol: number | null;
   selectedTeam: { id: number; name: string } | null;
   amount: string;
   onAmountChange: (v: string) => void;
@@ -136,7 +140,7 @@ export default function HomeView({
       {/* balances float over the hero */}
       <div className="-mt-11 grid grid-cols-2 gap-3">
         <BalanceCard label="Balance" icon={<Coins size={13} />} value={balanceUsd != null ? `$${balanceUsd.toFixed(2)}` : loadError ? "—" : "…"} />
-        <SavedCard value={savedSol != null ? savedSol.toFixed(4) : loadError ? "—" : "…"} celebrate={celebrate} />
+        <SavedCard value={savedSol != null ? savedSol.toFixed(4) : loadError ? "—" : "…"} celebrate={celebrate} stakedMsol={savedMsol} />
       </div>
 
       {loadError && onRetry && <RetryNotice onRetry={onRetry} />}

@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { PiggyBank, Plus, Trophy } from "lucide-react";
+import { PiggyBank, Plus, Trophy, Coins } from "lucide-react";
 import { useFanApp } from "@/lib/useFanApp";
 import { useChallengeNotes } from "@/lib/useChallengeNotes";
 import ChallengeCard from "@/components/ChallengeCard";
@@ -35,6 +35,7 @@ export default function MyChallengesPage() {
   }
 
   const hasSavings = (app.savedSol ?? 0) > 0;
+  const hasStaked = (app.savedMsol ?? 0) > 0;
 
   return (
     <div className="space-y-4">
@@ -49,12 +50,7 @@ export default function MyChallengesPage() {
       <div className="card p-4">
         <div className="flex items-center justify-between gap-3">
           <div>
-            {/* "Saved via DCA" = the vault's wSOL balance (app.savedSol), which
-                is currently the ONLY savings mechanism. When staking ships, add
-                a SECOND line here — "Saved via Staking" — reading the vault's
-                mSOL ATA balance (Marinade) alongside this one. Don't remove this
-                label back to a generic "Saved" then; the two need to be
-                distinguishable. */}
+            {/* "Saved via DCA" = the vault's wSOL balance (app.savedSol). */}
             <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-faint"><PiggyBank size={13} /> Saved via DCA</div>
             <div className="mt-1 flex items-baseline gap-1">
               <span className="font-mono text-2xl font-bold tabular-nums text-green-deep">{app.savedSol != null ? app.savedSol.toFixed(4) : app.loadError ? "—" : "…"}</span>
@@ -65,6 +61,24 @@ export default function MyChallengesPage() {
             Withdraw
           </button>
         </div>
+
+        {/* "Saved via Staking" = the vault's mSOL balance (app.savedMsol), from
+            Auto Stake challenges (execute_rule_staked -> Marinade). Only shown
+            once there's staked mSOL, so DCA-only users aren't confused by it. */}
+        {hasStaked && (
+          <div className="mt-3 flex items-center justify-between gap-3 border-t border-line pt-3">
+            <div>
+              <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-faint"><Coins size={13} /> Saved via Staking</div>
+              <div className="mt-1 flex items-baseline gap-1">
+                <span className="font-mono text-2xl font-bold tabular-nums text-green-deep">{app.savedMsol != null ? app.savedMsol.toFixed(4) : app.loadError ? "—" : "…"}</span>
+                <span className="text-sm font-semibold text-muted">mSOL</span>
+              </div>
+            </div>
+            <button className="btn-ghost" disabled={app.busy || !hasStaked} onClick={() => void app.withdrawStakedSavings()}>
+              Withdraw
+            </button>
+          </div>
+        )}
         {/* what "saving" means — plain-language note, always visible */}
         <p className="mt-3 rounded-xl bg-green-tint px-3 py-2.5 text-[13px] leading-relaxed text-green-deep">
           Your savings are <b>$SOL</b>. Each claim swaps your own USDC into SOL — like a small,

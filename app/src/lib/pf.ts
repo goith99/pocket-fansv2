@@ -134,14 +134,16 @@ export function ixRevokeRule(owner: PublicKey, ruleId: number): TransactionInstr
   });
 }
 
-// withdraw saved wSOL from vault back to the owner's wSOL ATA (no unwrap yet).
-export function ixWithdrawWsol(owner: PublicKey, amount: bigint): TransactionInstruction {
+// Withdraw saved tokens of any `mint` from the vault's ATA back to the owner's
+// ATA. The on-chain withdraw_from_vault is generic over token_mint, so this
+// serves both wSOL (Auto DCA) and mSOL (Auto Stake) — pass the mint. No unwrap.
+export function ixWithdrawFromVault(owner: PublicKey, mint: PublicKey, amount: bigint): TransactionInstruction {
   const vault = vaultPda(owner);
   return new TransactionInstruction({
     programId: PROGRAM_ID,
     keys: [
-      m(owner, true, true), m(vault, false, false), m(WSOL_MINT, false, false),
-      m(ata(WSOL_MINT, vault), false, true), m(ata(WSOL_MINT, owner), false, true), m(TOKEN_PROGRAM, false, false),
+      m(owner, true, true), m(vault, false, false), m(mint, false, false),
+      m(ata(mint, vault), false, true), m(ata(mint, owner), false, true), m(TOKEN_PROGRAM, false, false),
     ],
     data: Buffer.concat([disc(DISC.withdraw_from_vault), u64(amount)]),
   });
