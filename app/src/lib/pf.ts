@@ -500,6 +500,17 @@ export async function getUserRules(conn: Connection, owner: PublicKey, totalRule
   return out;
 }
 
+// A SINGLE rule, read fresh from chain. Used by the claim paths to size the
+// prepended SPL approve: the delegation must cover exactly what this rule is
+// about to pull, and computing that from cached UI state risks a stale
+// executions_done (which would under-approve and fail the claim).
+export async function getRule(conn: Connection, owner: PublicKey, ruleId: number): Promise<RuleView | null> {
+  const pda = rulePda(vaultPda(owner), ruleId);
+  const info = await conn.getAccountInfo(pda);
+  if (!info) return null;
+  return decodeRule(pda, Buffer.from(info.data));
+}
+
 export async function tokenUiBalance(conn: Connection, mint: PublicKey, owner: PublicKey): Promise<{ raw: bigint; ui: number } | null> {
   try {
     const bal = await conn.getTokenAccountBalance(ata(mint, owner));

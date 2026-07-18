@@ -6,6 +6,14 @@ import RetryNotice from "./RetryNotice";
 import DevUsdcFaucetCard from "./DevUsdcFaucetCard";
 import type { RuleView } from "@/lib/pf";
 
+// Goal scored is DISABLED: GoalScored rules are claimed by the permissionless
+// keeper (execute_rule_verified), which pulls USDC via the same single shared SPL
+// delegation every other rule uses. When that delegation is overwritten,
+// exhausted or revoked by another rule, a keeper claim fails silently with no
+// user-facing signal. The self-claim paths repair this by prepending an approve
+// (see approveForRule in useFanApp.ts); the keeper cannot. Creation is also hard-
+// blocked in createGoalChallenge itself — see GOALSCORED_CREATION_ENABLED in
+// constants.ts. Existing on-chain GoalScored rules are untouched.
 const WHEN = [
   { label: "Team wins", state: "active" as const },
   { label: "Goal scored", state: "soon" as const },

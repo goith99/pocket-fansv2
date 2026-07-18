@@ -55,6 +55,27 @@ export const MARINADE_LIQ_POOL_MSOL_LEG_AUTHORITY = new PublicKey("EyaSjUtSgo9aR
 // Mirrors programs/pocket_fans/src/constants.rs TXORACLE_PROGRAM_ID.
 export const TXORACLE_PROGRAM = new PublicKey("6pW64gN1s2uqjHkn1unFeEjAwJkPGHoppGvS715wyP2J");
 
+// KILL SWITCH — creating new GoalScored rules is DISABLED.
+//
+// GoalScored rules are claimed by the permissionless keeper
+// (execute_rule_verified), which pulls the user's USDC through the same single
+// shared SPL delegation every rule uses. create_rule's token::approve OVERWRITES
+// rather than accumulates, so that delegation is routinely destroyed by a newer
+// rule, by an execution draining it to zero, or by revoke_rule on any rule. The
+// self-claim paths repair this by prepending an approve in the claim transaction
+// (see approveForRule in useFanApp.ts) — but the keeper CANNOT: it submits the
+// transaction itself and cannot sign an approve on the user's behalf. A
+// GoalScored rule whose delegation has died therefore fails silently, with no
+// user-facing signal that their savings never happened.
+//
+// Enforced inside createGoalChallenge itself, NOT only in the UI, so no page
+// (including the /dev/goal-rule harness) can create one by calling it directly.
+// Existing on-chain GoalScored rules are unaffected.
+//
+// Flip to true ONLY once create_rule/revoke_rule's shared-delegation model has a
+// real per-rule fix.
+export const GOALSCORED_CREATION_ENABLED = false;
+
 // TxLINE soccer stat keys: 1 = home goals, 2 = away goals (period offset 0 =
 // full-match total). WHICH of the two a rule pins depends on the side the
 // backed team plays on in that specific fixture — resolved at create_rule time.
