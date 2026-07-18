@@ -59,6 +59,15 @@ export const MIN_SQRT_PRICE = 4295048016n; // lower bound, used for A->B (SOL->U
 
 // This phase's rule defaults.
 export const DEFAULT_MAX_SLIPPAGE_BPS = 1500;
+// Safety haircut applied ONLY to the withdraw chained after a self-claim (see
+// claimChallenge in useFanApp.ts) — deliberately INDEPENDENT of the swap's own
+// DEFAULT_MAX_SLIPPAGE_BPS. The swap protects itself at ~15%; the chained
+// withdraw just needs to sit safely below the actual swap output, so we withdraw
+// expected_output x (1 - 5%). ~95% auto-lands in the wallet; the 5% absorbs
+// build->broadcast price drift on the (thinner, more erratic) devnet pool. If
+// drift ever exceeds it, only the withdraw reverts and the claim is retried — no
+// funds at risk, and the swap's 15% protection is untouched.
+export const WITHDRAW_FLOOR_BUFFER_BPS = 500;
 // FIXED at 1 (not a tunable "default"): each rule is pinned to exactly one
 // match (match_id + match_end_ts fixed at create_rule) — a single match only
 // ever finishes once, so it can only ever be legitimately claimed once.

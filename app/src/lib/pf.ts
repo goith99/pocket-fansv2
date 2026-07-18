@@ -466,6 +466,33 @@ export async function estimateUsdcOut(conn: Connection, lamportsIn: bigint, slip
   return (expected * BigInt(10_000 - slippageBps)) / 10_000n;
 }
 
+// Reads the pool's live sqrt_price and returns the expected wSOL output for
+// swapping `amountInRaw` devUSDC (token B) -> wSOL (token A), minus a `bufferBps`
+// haircut. Byte-for-byte the same two-step Q64 math as the on-chain
+// `compute_min_out` in programs/pocket_fans/src/instructions/execute_rule.rs
+// (same sqrt_price offset 65..81, same integer-division order) — so passing the
+// rule's own slippage reproduces the exact on-chain min_out.
+//
+// Callers sizing a withdraw chained after execute_rule pass a SMALLER,
+// independent buffer (WITHDRAW_FLOOR_BUFFER_BPS, ~5%), NOT the swap's slippage:
+// the withdraw only needs to sit safely below the ACTUAL swap output, not match
+// the swap's own protection. Reusing the swap's ~15% would strand that whole
+// gap in the vault (a tiny swap's real price impact is ~0, so actual output
+// lands near `expected`). With the tighter buffer the withdraw can, in the rare
+// case that real drift+impact exceeds it, revert — which just reverts the whole
+// claim for a retry; no funds at risk, swap protection unchanged.
+export async function estimateWsolOut(conn: Connection, amountInRaw: bigint, bufferBps: number): Promise<bigint> {
+  const info = await conn.getAccountInfo(WHIRLPOOL);
+  if (!info) throw new Error("whirlpool account not found");
+  const d = Buffer.from(info.data);
+  const sqrtPrice = d.readBigUInt64LE(65) | (d.readBigUInt64LE(73) << 64n);
+  if (sqrtPrice <= 0n) throw new Error("whirlpool sqrt_price unreadable");
+  const Q64 = 1n << 64n;
+  const t = (amountInRaw * Q64) / sqrtPrice;
+  const expected = (t * Q64) / sqrtPrice;
+  return (expected * BigInt(10_000 - bufferBps)) / 10_000n;
+}
+
 // Wrap `lamportsIn` SOL and swap it to devUSDC via a real Orca CPI (A->B,
 // a_to_b=true). Generous default slippage (30%) since this is a devnet
 // convenience faucet, not a real-value trade — protects against a stale-price

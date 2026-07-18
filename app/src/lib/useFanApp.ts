@@ -12,16 +12,16 @@
 // passed. See programs/pocket_fans/src/instructions/execute_rule.rs.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePrivy, useSolanaWallets } from "@privy-io/react-auth";
-import { Connection, PublicKey, Transaction, TransactionInstruction } from "@solana/web3.js";
+import { Connection, PublicKey, Transaction, TransactionInstruction, ComputeBudgetProgram } from "@solana/web3.js";
 import { createAssociatedTokenAccountIdempotentInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token";
 import {
   DEVUSDC_MINT, WSOL_MINT, DEVUSDC_DECIMALS, DEFAULT_MAX_EXECUTIONS, DEFAULT_MAX_SLIPPAGE_BPS,
-  MATCH_END_BUFFER_SECS, STAT_KEY_HOME_GOALS, STAT_KEY_AWAY_GOALS,
+  MATCH_END_BUFFER_SECS, STAT_KEY_HOME_GOALS, STAT_KEY_AWAY_GOALS, WITHDRAW_FLOOR_BUFFER_BPS,
 } from "@/lib/constants";
 import {
   vaultPda, ata, ixInitializeVault, ixCreateRule, ixRevokeRule, ixWithdrawWsol,
   ixExecuteRuleSelfClaim, ticksForBToA, getUserVault, getUserRules, tokenUiBalance, RuleView,
-  ixWrapSol, ixSyncNative, ixSwapSolToUsdc, ticksForAToB, estimateUsdcOut,
+  ixWrapSol, ixSyncNative, ixSwapSolToUsdc, ticksForAToB, estimateUsdcOut, estimateWsolOut,
 } from "@/lib/pf";
 import { TEAM_BY_ID } from "@/lib/flags";
 import { useTxFlow } from "@/components/TransactionFlow";
@@ -258,14 +258,42 @@ export function useFanApp() {
   const claimChallenge = useCallback(async (ruleId: number) => {
     if (!address) return null;
     const owner = new PublicKey(address);
+    const vault = vaultPda(owner);
+    const rule = challenges.find((r) => r.ruleId === ruleId);
     const sig = await run("Claiming your savings", async (onSent) => {
       const { ta0, ta1, ta2, whirlpoolOracle } = await ticksForBToA(connection);
-      const ix = ixExecuteRuleSelfClaim({ owner, ruleId, tickArray0: ta0, tickArray1: ta1, tickArray2: ta2, whirlpoolOracle });
-      return submit([ix], onSent);
+      // Bump the CU limit past the 200k default: this tx now runs the heavy Orca
+      // swap CPI AND a follow-up vault->wallet transfer.
+      const ixs: TransactionInstruction[] = [
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
+      ];
+      // The chained withdraw pays out to the owner's wSOL ATA — make sure it exists.
+      const ownerWsol = ata(WSOL_MINT, owner);
+      if (!(await connection.getAccountInfo(ownerWsol))) {
+        ixs.push(createAssociatedTokenAccountIdempotentInstruction(owner, ownerWsol, owner, WSOL_MINT));
+      }
+      // 1) self-claim: swap the owner's USDC into wSOL held in their vault.
+      ixs.push(ixExecuteRuleSelfClaim({ owner, ruleId, tickArray0: ta0, tickArray1: ta1, tickArray2: ta2, whirlpoolOracle }));
+      // 2) chain a withdraw in the SAME tx so the saved SOL lands in the owner's
+      //    wallet with no second tap. Amount = current vault wSOL balance + a
+      //    floor of expected_output x (1 - WITHDRAW_FLOOR_BUFFER_BPS). The buffer
+      //    (~5%) is INDEPENDENT of the swap's own min_out (rule.maxSlippageBps,
+      //    ~15%, which still fully protects the swap): it just has to sit below
+      //    the ACTUAL output so the withdraw can't exceed the post-swap balance,
+      //    leaving only ~5% in the vault (swept by a later full withdraw) instead
+      //    of the swap's whole ~15%. If the rule params are unavailable, fall back
+      //    to claim-only.
+      if (rule?.amountUsdc) {
+        const preBal = (await tokenUiBalance(connection, WSOL_MINT, vault))?.raw ?? 0n;
+        const floor = await estimateWsolOut(connection, BigInt(rule.amountUsdc), WITHDRAW_FLOOR_BUFFER_BPS);
+        const withdrawAmt = preBal + floor;
+        if (withdrawAmt > 0n) ixs.push(ixWithdrawWsol(owner, withdrawAmt));
+      }
+      return submit(ixs, onSent);
     });
     if (sig) await refresh();
     return sig;
-  }, [address, connection, refresh, run]);
+  }, [address, connection, challenges, refresh, run]);
 
   const withdrawSavings = useCallback(async () => {
     if (!address) return null;
