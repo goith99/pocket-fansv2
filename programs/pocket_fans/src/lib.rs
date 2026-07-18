@@ -61,6 +61,15 @@ pub mod pocket_fans {
         instructions::execute_rule::handler(ctx, rule_id)
     }
 
+    /// Rule OWNER ONLY (self-claim), DIRECT-TO-OWNER variant of execute_rule:
+    /// identical delegated USDC pull + vault-signed Orca swap, but the swapped
+    /// wSOL lands straight in the owner's own wSOL ATA instead of the vault's —
+    /// one instruction, no withdraw, no dust. execute_rule is untouched. See
+    /// instructions/execute_rule_direct.rs.
+    pub fn execute_rule_direct(ctx: Context<ExecuteRuleDirect>, rule_id: u16) -> Result<()> {
+        instructions::execute_rule_direct::handler(ctx, rule_id)
+    }
+
     /// GoalScored trigger — callable by ANYONE (a permissionless keeper bot, or
     /// the owner themself as a manual fallback). No signer identity is trusted;
     /// the Txoracle `validate_stat_v2` CPI verdict is the only gate. Entirely

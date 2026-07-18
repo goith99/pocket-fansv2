@@ -7,6 +7,7 @@
 
 pub mod create_rule;
 pub mod execute_rule;
+pub mod execute_rule_direct;
 pub mod execute_rule_staked;
 pub mod execute_rule_verified;
 pub mod initialize_vault;
@@ -19,6 +20,7 @@ pub mod withdraw_from_vault;
 
 pub use create_rule::*;
 pub use execute_rule::*;
+pub use execute_rule_direct::*;
 pub use execute_rule_staked::*;
 pub use execute_rule_verified::*;
 pub use initialize_vault::*;
