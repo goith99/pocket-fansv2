@@ -30,6 +30,7 @@ export const DISC = {
   revoke_rule: [41, 239, 224, 254, 61, 31, 56, 1],
   withdraw_from_vault: [180, 34, 37, 46, 156, 0, 211, 238],
   execute_rule: [143, 36, 13, 104, 240, 240, 207, 192],
+  execute_rule_direct: [156, 227, 233, 110, 247, 23, 64, 62],
   execute_rule_verified: [109, 158, 73, 235, 69, 145, 96, 155],
   execute_rule_staked: [230, 120, 146, 64, 213, 216, 43, 197],
 } as const;

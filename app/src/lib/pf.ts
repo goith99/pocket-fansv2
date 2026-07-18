@@ -189,6 +189,50 @@ export function ixExecuteRuleSelfClaim(args: {
 }
 
 // ===========================================================================
+// execute_rule_direct — SwapAndSave (TeamWin self-claim, Auto DCA -> wSOL)
+// ===========================================================================
+// Direct-to-owner variant of ixExecuteRuleSelfClaim above. IDENTICAL account
+// list except slot 8: the swap OUTPUT is the OWNER's wSOL ATA instead of the
+// vault's, so the full swap output lands in the wallet in ONE instruction with
+// no chained withdraw and no dust. The vault PDA is still the swap's
+// token_authority (it signs via invoke_signed inside the program) — verified on
+// devnet that Orca does not require the output account to be owned by that
+// authority. Order mirrors ExecuteRuleDirect in
+// programs/pocket_fans/src/instructions/execute_rule_direct.rs exactly.
+export function ixExecuteRuleDirect(args: {
+  owner: PublicKey; ruleId: number;
+  tickArray0: PublicKey; tickArray1: PublicKey; tickArray2: PublicKey;
+  whirlpoolOracle: PublicKey;
+}): TransactionInstruction {
+  const vault = vaultPda(args.owner);
+  const rule = rulePda(vault, args.ruleId);
+  const data = Buffer.concat([disc(DISC.execute_rule_direct), u16(args.ruleId)]);
+  return new TransactionInstruction({
+    programId: PROGRAM_ID,
+    keys: [
+      m(args.owner, true, true),
+      m(vault, false, false),
+      m(rule, false, true),
+      m(DEVUSDC_MINT, false, false),
+      m(WSOL_MINT, false, false),
+      m(ata(DEVUSDC_MINT, args.owner), false, true),
+      m(ata(DEVUSDC_MINT, vault), false, true),
+      m(ata(WSOL_MINT, args.owner), false, true), // <-- OWNER's wSOL, not the vault's
+      m(WHIRLPOOL, false, true),
+      m(WHIRLPOOL_VAULT_A, false, true),
+      m(WHIRLPOOL_VAULT_B, false, true),
+      m(args.tickArray0, false, true),
+      m(args.tickArray1, false, true),
+      m(args.tickArray2, false, true),
+      m(args.whirlpoolOracle, false, true),
+      m(WHIRLPOOL_PROGRAM, false, false),
+      m(TOKEN_PROGRAM, false, false),
+    ],
+    data,
+  });
+}
+
+// ===========================================================================
 // execute_rule_staked — SwapStakeAndSave (TeamWin self-claim, Auto Stake -> mSOL)
 // ===========================================================================
 // Owner-signed self-claim (same trust model as ixExecuteRuleSelfClaim): pulls

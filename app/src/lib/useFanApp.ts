@@ -16,12 +16,12 @@ import { Connection, PublicKey, Transaction, TransactionInstruction, ComputeBudg
 import { createAssociatedTokenAccountIdempotentInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token";
 import {
   DEVUSDC_MINT, WSOL_MINT, MSOL_MINT, DEVUSDC_DECIMALS, DEFAULT_MAX_EXECUTIONS, DEFAULT_MAX_SLIPPAGE_BPS,
-  MATCH_END_BUFFER_SECS, STAT_KEY_HOME_GOALS, STAT_KEY_AWAY_GOALS, WITHDRAW_FLOOR_BUFFER_BPS,
+  MATCH_END_BUFFER_SECS, STAT_KEY_HOME_GOALS, STAT_KEY_AWAY_GOALS,
 } from "@/lib/constants";
 import {
   vaultPda, ata, ixInitializeVault, ixCreateRule, ixRevokeRule, ixWithdrawFromVault,
-  ixExecuteRuleSelfClaim, ixExecuteRuleStaked, ticksForBToA, getUserVault, getUserRules, tokenUiBalance, RuleView,
-  ixWrapSol, ixSyncNative, ixSwapSolToUsdc, ticksForAToB, estimateUsdcOut, estimateWsolOut,
+  ixExecuteRuleDirect, ixExecuteRuleStaked, ticksForBToA, getUserVault, getUserRules, tokenUiBalance, RuleView,
+  ixWrapSol, ixSyncNative, ixSwapSolToUsdc, ticksForAToB, estimateUsdcOut,
 } from "@/lib/pf";
 import { TEAM_BY_ID } from "@/lib/flags";
 import { useTxFlow } from "@/components/TransactionFlow";
@@ -304,42 +304,31 @@ export function useFanApp() {
   const claimChallenge = useCallback(async (ruleId: number) => {
     if (!address) return null;
     const owner = new PublicKey(address);
-    const vault = vaultPda(owner);
-    const rule = challenges.find((r) => r.ruleId === ruleId);
     const sig = await run("Claiming your savings", async (onSent) => {
       const { ta0, ta1, ta2, whirlpoolOracle } = await ticksForBToA(connection);
-      // Bump the CU limit past the 200k default: this tx now runs the heavy Orca
-      // swap CPI AND a follow-up vault->wallet transfer.
+      // Bump the CU limit past the 200k default for the Orca swap CPI. Measured
+      // ~50k on devnet for this instruction; 400k leaves generous headroom.
       const ixs: TransactionInstruction[] = [
         ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
       ];
-      // The chained withdraw pays out to the owner's wSOL ATA — make sure it exists.
+      // The swap output goes straight to the owner's wSOL ATA — make sure it exists.
       const ownerWsol = ata(WSOL_MINT, owner);
       if (!(await connection.getAccountInfo(ownerWsol))) {
         ixs.push(createAssociatedTokenAccountIdempotentInstruction(owner, ownerWsol, owner, WSOL_MINT));
       }
-      // 1) self-claim: swap the owner's USDC into wSOL held in their vault.
-      ixs.push(ixExecuteRuleSelfClaim({ owner, ruleId, tickArray0: ta0, tickArray1: ta1, tickArray2: ta2, whirlpoolOracle }));
-      // 2) chain a withdraw in the SAME tx so the saved SOL lands in the owner's
-      //    wallet with no second tap. Amount = current vault wSOL balance + a
-      //    floor of expected_output x (1 - WITHDRAW_FLOOR_BUFFER_BPS). The buffer
-      //    (~5%) is INDEPENDENT of the swap's own min_out (rule.maxSlippageBps,
-      //    ~15%, which still fully protects the swap): it just has to sit below
-      //    the ACTUAL output so the withdraw can't exceed the post-swap balance,
-      //    leaving only ~5% in the vault (swept by a later full withdraw) instead
-      //    of the swap's whole ~15%. If the rule params are unavailable, fall back
-      //    to claim-only.
-      if (rule?.amountUsdc) {
-        const preBal = (await tokenUiBalance(connection, WSOL_MINT, vault))?.raw ?? 0n;
-        const floor = await estimateWsolOut(connection, BigInt(rule.amountUsdc), WITHDRAW_FLOOR_BUFFER_BPS);
-        const withdrawAmt = preBal + floor;
-        if (withdrawAmt > 0n) ixs.push(ixWithdrawFromVault(owner, WSOL_MINT, withdrawAmt));
-      }
+      // ONE instruction: swap the owner's USDC to wSOL landing DIRECTLY in their
+      // wallet. This replaces the old execute_rule + chained withdraw_from_vault
+      // pair, which had to withdraw a slippage-floor amount
+      // (WITHDRAW_FLOOR_BUFFER_BPS) and stranded ~5% dust in the vault on every
+      // claim. Nothing transits the vault now, so there is no floor to estimate
+      // and no dust to sweep. WITHDRAW_FLOOR_BUFFER_BPS / ixWithdrawFromVault are
+      // still used by the staking path and the manual Withdraw control.
+      ixs.push(ixExecuteRuleDirect({ owner, ruleId, tickArray0: ta0, tickArray1: ta1, tickArray2: ta2, whirlpoolOracle }));
       return submit(ixs, onSent);
     });
     if (sig) await refresh();
     return sig;
-  }, [address, connection, challenges, refresh, run]);
+  }, [address, connection, refresh, run]);
 
   // AUTO STAKE self-claim (execute_rule_staked): sibling of claimChallenge for
   // SwapStakeAndSave rules. Swaps USDC->wSOL, unwraps to SOL, deposits into
