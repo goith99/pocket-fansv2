@@ -42,6 +42,25 @@ interface Fixture {
   score?: { p1: number; p2: number; winnerId: number } | null;
 }
 
+// Can a NEW challenge still be created against this fixture?
+//
+// The binding constraint is on-chain, not cosmetic: create_rule requires
+// `match_end_ts > now`, and both create paths derive
+// match_end_ts = kickoff + MATCH_END_BUFFER_SECS. So the real test is whether
+// that derived timestamp is still in the future — NOT whether kickoff is.
+// A LIVE match therefore stays creatable (kickoff passed, match_end_ts hasn't),
+// which is correct: a TeamWin rule created mid-match is claimable after it ends.
+//
+// Status alone is NOT sufficient. A fixture whose status lags reality — stale
+// cache, poller delay, a match that ran long — reads "upcoming" with a kickoff
+// long past. Filtering on status only is what let the picker show teams from
+// week-old matches and let createChallenge build a doomed match_end_ts.
+// Checking both means a status lag can no longer produce an invalid rule.
+function isFixtureCreatable(f: Fixture, nowMs: number): boolean {
+  if (f.status === "finished") return false;
+  return f.startTime + MATCH_END_BUFFER_SECS * 1000 > nowMs;
+}
+
 export function useFanApp() {
   const { ready, authenticated, login, logout, user } = usePrivy();
   const { wallets } = useSolanaWallets();
@@ -136,11 +155,17 @@ export function useFanApp() {
   // picker itself only ever chose a team, not a specific fixture, so we resolve
   // that here rather than adding a second picker to the UI.
   function nextFixtureForTeam(teamId: number): Fixture | null {
-    const now = Date.now();
+    const nowMs = Date.now();
     const candidates = fixtures
-      .filter((f) => (f.participant1.id === teamId || f.participant2.id === teamId) && f.status !== "finished")
+      .filter((f) => (f.participant1.id === teamId || f.participant2.id === teamId) && isFixtureCreatable(f, nowMs))
       .sort((a, b) => a.startTime - b.startTime);
-    return candidates.find((f) => f.startTime >= now) ?? candidates[0] ?? null;
+    // Soonest genuinely-creatable fixture, or NOTHING. The old code fell back to
+    // `candidates[0]` when nothing was still upcoming, which could hand back a
+    // fixture that had already kicked off — createChallenge then derived a
+    // match_end_ts in the past and create_rule rejected the whole transaction
+    // with InvalidMatchEndTs. Never guess a fixture; if there isn't a valid one,
+    // say so and let the caller surface "no scheduled match".
+    return candidates[0] ?? null;
   }
 
   // create a challenge (program: create_rule). Also ensures the owner's + vault's
@@ -510,9 +535,13 @@ export function useFanApp() {
   // NOTE: only the PICKER uses this. `teams` stays the full list so teamName()
   // still resolves an already-backed team whose fixtures are all finished.
   const activeTeams = useMemo(() => {
+    const nowMs = Date.now();
     const hasUpcoming = new Set<number>();
     for (const f of fixtures) {
-      if (f.status !== "upcoming" && f.status !== "live") continue;
+      // Same guard createChallenge uses, so the picker can only ever offer a
+      // team whose challenge would actually succeed on-chain. Status alone let
+      // teams from week-old matches stay selectable when the cache went stale.
+      if (!isFixtureCreatable(f, nowMs)) continue;
       hasUpcoming.add(f.participant1.id);
       hasUpcoming.add(f.participant2.id);
     }

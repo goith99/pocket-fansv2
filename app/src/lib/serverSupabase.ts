@@ -10,7 +10,23 @@ function client() {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) throw new Error("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not configured");
-  return createClient(url, key, { auth: { persistSession: false } });
+  return createClient(url, key, {
+    auth: { persistSession: false },
+    // MUST bypass Next's Data Cache. supabase-js issues its queries through the
+    // global `fetch`, which the Next App Router patches and caches with
+    // force-cache semantics by default. `export const dynamic = "force-dynamic"`
+    // on the route makes RENDERING dynamic but does not opt these nested fetches
+    // out, so /api/schedule happily served a ~6.5-day-old snapshot of
+    // fixtures_cache: finished matches still reading "upcoming", and the two
+    // genuinely-upcoming fixtures missing entirely. That fed the team picker
+    // stale teams AND made createChallenge derive a match_end_ts already in the
+    // past, which create_rule rejects with InvalidMatchEndTs.
+    //
+    // These are live sports results — every read must hit Postgres.
+    global: {
+      fetch: (input, init) => fetch(input, { ...init, cache: "no-store" }),
+    },
+  });
 }
 
 export interface CachedFixture {
