@@ -13,14 +13,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePrivy, useSolanaWallets } from "@privy-io/react-auth";
 import { Connection, PublicKey, Transaction, TransactionInstruction, ComputeBudgetProgram } from "@solana/web3.js";
-import { createAssociatedTokenAccountIdempotentInstruction, createApproveInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token";
+import { createAssociatedTokenAccountIdempotentInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token";
 import {
   DEVUSDC_MINT, WSOL_MINT, MSOL_MINT, DEVUSDC_DECIMALS, DEFAULT_MAX_EXECUTIONS, DEFAULT_MAX_SLIPPAGE_BPS,
   MATCH_END_BUFFER_SECS, STAT_KEY_HOME_GOALS, STAT_KEY_AWAY_GOALS, GOALSCORED_CREATION_ENABLED,
 } from "@/lib/constants";
 import {
   vaultPda, ata, ixInitializeVault, ixCreateRule, ixRevokeRule, ixWithdrawFromVault,
-  ixExecuteRuleDirect, ixExecuteRuleStakedDirect, ticksForBToA, getUserVault, getUserRules, getRule, tokenUiBalance, RuleView,
+  ixExecuteRuleDirect, ixExecuteRuleStakedDirect, ticksForBToA, getUserVault, getUserRules, tokenUiBalance, RuleView,
   ixWrapSol, ixSyncNative, ixSwapSolToUsdc, ticksForAToB, estimateUsdcOut, estimateWsolOut,
 } from "@/lib/pf";
 import { TEAM_BY_ID } from "@/lib/flags";
@@ -414,38 +414,6 @@ export function useFanApp() {
   // SELF-CLAIM: the owner executes their own rule directly, once its
   // match_end_ts has passed — no admin, no oracle. Replaces the old flow where
   // an admin wallet built + signed this from /admin.
-  // SHARED-DELEGATION REPAIR (frontend-only; no program change).
-  //
-  // create_rule grants the vault an SPL delegation via token::approve on the
-  // owner's single USDC ATA — and SPL `approve` OVERWRITES, it does not
-  // accumulate. So a wallet only ever holds ONE allowance, belonging to whichever
-  // rule was created last. That allowance dies three ways: a newer rule
-  // overwrites it, an execution drains it to 0 (SPL then clears the delegate
-  // entirely), or revoke_rule on ANY rule blanket-revokes it. Any other rule then
-  // fails its delegated pull with SPL OwnerMismatch (0x4) — which is exactly what
-  // broke rule #11.
-  //
-  // Fix: immediately before the claim instruction, in the SAME transaction,
-  // re-approve exactly what THIS rule still needs. The owner is already signing,
-  // so no extra prompt. Atomic with the claim, so nothing can race in between.
-  //
-  // Scope: the three OWNER-SIGNED self-claim paths only (execute_rule,
-  // execute_rule_direct, execute_rule_staked). It CANNOT help
-  // execute_rule_verified — the keeper submits that transaction and cannot sign
-  // an approve on the user's behalf, which is why GoalScored stays disabled in
-  // the UI until create_rule/revoke_rule are properly fixed.
-  const approveForRule = useCallback(async (owner: PublicKey, ruleId: number): Promise<TransactionInstruction> => {
-    const rule = await getRule(connection, owner, ruleId);
-    if (!rule) throw new Error("Challenge not found on-chain");
-    if (!rule.amountUsdc) throw new Error("Challenge has no amount to save");
-    const remaining = rule.maxExecutions - rule.executionsDone;
-    if (remaining <= 0) throw new Error("This challenge has already been fully claimed");
-    // Exactly this rule's outstanding need — never more. Bounds what the vault
-    // can pull to what the user opted into for this specific challenge.
-    const needed = BigInt(rule.amountUsdc) * BigInt(remaining);
-    return createApproveInstruction(ata(DEVUSDC_MINT, owner), vaultPda(owner), owner, needed);
-  }, [connection]);
-
   const claimChallenge = useCallback(async (ruleId: number) => {
     if (!address) return null;
     const owner = new PublicKey(address);
@@ -461,10 +429,12 @@ export function useFanApp() {
       if (!(await connection.getAccountInfo(ownerWsol))) {
         ixs.push(createAssociatedTokenAccountIdempotentInstruction(owner, ownerWsol, owner, WSOL_MINT));
       }
-      // Re-establish the SPL delegation for THIS rule, immediately before the
-      // instruction that consumes it, in the same transaction. See
-      // approveForRule() for why this is necessary.
-      ixs.push(await approveForRule(owner, ruleId));
+      // NO delegation top-up needed here. create_rule now ACCUMULATES the SPL
+      // delegation and revoke_rule SUBTRACTS only its own share, so a rule's
+      // allowance can no longer be destroyed by a sibling rule being created or
+      // cancelled. The prepended re-approve this used to carry was a client-side
+      // workaround for that bug; it also could not help the permissionless keeper
+      // path, which is why the fix moved into the program.
       // ONE instruction: swap the owner's USDC to wSOL landing DIRECTLY in their
       // wallet. This replaces the old execute_rule + chained withdraw_from_vault
       // pair, which had to withdraw a slippage-floor amount
@@ -477,7 +447,7 @@ export function useFanApp() {
     });
     if (sig) await refresh();
     return sig;
-  }, [address, connection, refresh, run, approveForRule]);
+  }, [address, connection, refresh, run]);
 
   // AUTO STAKE self-claim (execute_rule_staked): sibling of claimChallenge for
   // SwapStakeAndSave rules. Swaps USDC->wSOL, unwraps to SOL, deposits into
@@ -507,8 +477,6 @@ export function useFanApp() {
       if (!(await connection.getAccountInfo(ownerMsol))) {
         ixs.push(createAssociatedTokenAccountIdempotentInstruction(owner, ownerMsol, owner, MSOL_MINT));
       }
-      // Same shared-delegation repair as claimChallenge — see approveForRule().
-      ixs.push(await approveForRule(owner, ruleId));
       // ONE instruction: swap -> unwrap -> Marinade deposit, with the minted mSOL
       // landing DIRECTLY in the owner's wallet. Replaces the vault-landing
       // ixExecuteRuleStaked, which required a separate withdraw to collect.
@@ -517,7 +485,7 @@ export function useFanApp() {
     });
     if (sig) await refresh();
     return sig;
-  }, [address, connection, refresh, run, approveForRule]);
+  }, [address, connection, refresh, run]);
 
   const withdrawSavings = useCallback(async () => {
     if (!address) return null;

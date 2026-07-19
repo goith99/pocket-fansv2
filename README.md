@@ -10,7 +10,7 @@ Built for the TxODDS × Superteam × Solana World Cup Hackathon — Consumer & F
 
 ## What "saving" means here
 
-Each time a challenge fires, `amount_usdc` is pulled from the user's wallet **via a bounded SPL delegation they granted themselves** at challenge creation, swapped USDC → wSOL through a real Orca Whirlpools CPI (slippage-protected `min_out` derived from the pool's live `sqrt_price`), and delivered as SOL savings.
+Each time a challenge fires, `amount_usdc` is pulled from the user's wallet **via a bounded SPL delegation they granted themselves** at challenge creation (cumulative across rules — `create_rule` adds to the running total and `revoke_rule` subtracts only its own share, so rules never invalidate each other), swapped USDC → wSOL through a real Orca Whirlpools CPI (slippage-protected `min_out` derived from the pool's live `sqrt_price`), and delivered as SOL savings.
 
 There is **no way to lose funds to a counterparty**: nothing is staked against anyone, no payout depends on being "right", and funds only ever move from the user's wallet to the user's own wallet or vault. The match decides *when* the fan is nudged to move their own money out of a stablecoin — not whether they keep it.
 
@@ -28,7 +28,7 @@ Match results appear in the UI (read-only, from TxLINE) as information for the f
 
 A fundamentally different trust model, in its own instruction (`execute_rule_verified`). **No signer identity is trusted at all.** Anyone may submit the claim — a keeper bot, or the owner themselves as fallback — and the only gate is a CPI into TxODDS's on-chain **Txoracle** `validate_stat_v2`, which must verify a Merkle proof that the pinned stat reached its threshold. The program builds the comparison strategy itself and pins `fixture_id` + `stat_key` on-chain, so a caller cannot substitute another match's or another stat's proof.
 
-**The on-chain instruction works and has fired successfully on devnet.** However, **creating new Goal Scored rules is disabled in the UI** (`GOALSCORED_CREATION_ENABLED = false` in `app/src/lib/constants.ts`), enforced inside `createGoalChallenge` itself rather than only on the UI chip, so no page can bypass it. See [Known limitations](#known-limitations) for why. Existing on-chain Goal Scored rules are unaffected.
+**The on-chain instruction works and has fired successfully on devnet.** However, **creating new Goal Scored rules is disabled in the UI** (`GOALSCORED_CREATION_ENABLED = false` in `app/src/lib/constants.ts`), enforced inside `createGoalChallenge` itself rather than only on the UI chip, so no page can bypass it. This is now a deliberate hold rather than a blocker: the shared-delegation bug that originally forced it has been fixed in the program. Existing on-chain Goal Scored rules are unaffected.
 
 The keeper loop that watches live matches is separately gated by `GOAL_WATCH_ENABLED` (default `false`) in the poller service.
 
@@ -71,7 +71,7 @@ The **`_direct` variants** collapse this into a single instruction that delivers
 | `execute_rule_staked` | user (self-claim) | Team Wins → swap + Marinade → mSOL **in the vault** |
 | `execute_rule_staked_direct` | user (self-claim) | Team Wins → swap + Marinade → mSOL **straight to wallet** |
 | `execute_rule_verified` | **anyone** (oracle-gated) | Goal Scored → Txoracle proof required, then swap |
-| `revoke_rule` | user | Deactivate a rule and clear its delegation |
+| `revoke_rule` | user | Deactivate a rule and release its share of the delegation |
 | `withdraw_from_vault` | user | Withdraw saved tokens (mint-generic: wSOL or mSOL) |
 
 ## Deployment
@@ -89,23 +89,11 @@ Instruction-level transaction signatures and verification steps are in [DEVNET.m
 
 **This is a devnet hackathon project. It has not been audited and is not production-ready.**
 
-### Shared SPL delegation (root cause, not yet fixed at the program level)
-
-`create_rule` grants the vault an SPL delegation via `token::approve` on the user's single USDC token account. **SPL `approve` overwrites rather than accumulates**, so a wallet only ever holds *one* allowance — belonging to whichever rule was created last. That allowance is destroyed when a newer rule overwrites it, when an execution drains it to zero (SPL then clears the delegate entirely), or when `revoke_rule` on *any* rule blanket-revokes it. Other rules then fail their delegated pull with SPL `OwnerMismatch`.
-
-**Mitigation (self-claim paths only):** the frontend prepends a `token::approve` for exactly that rule's outstanding need immediately before the claim instruction, in the same transaction. The user is already signing, so there's no extra prompt, and the delegation is re-established atomically with its use.
-
-**This mitigation cannot work for the keeper path.** The keeper submits `execute_rule_verified` itself and cannot sign an approve on the user's behalf, so a Goal Scored rule whose delegation has been destroyed fails silently — with no user-facing signal that the save never happened. That is why Goal Scored rule creation is disabled.
-
-A real fix belongs in the program (per-rule delegation accounting, or an approve strategy that doesn't clobber sibling rules) and would let Goal Scored be re-enabled.
-
-### Other
-
-- **Goal Scored creation is disabled** pending the above. The instruction itself works; only new rule creation is blocked.
+- **Goal Scored creation is disabled** (`GOALSCORED_CREATION_ENABLED = false`). The instruction works and has fired on devnet, and the shared-delegation blocker that originally forced this is now fixed — re-enabling is a deliberate decision still to be made, pending an end-to-end run of the keeper path.
 - **The keeper loop is off by default** (`GOAL_WATCH_ENABLED=false`), gated on keeper funding and TxLINE stat-validation access.
 - **A stuck fixture status is possible.** If the poller is down when a match finalises, its cached status can remain `live` indefinitely. This affects display only — claims are gated on the rule's own `match_end_ts`, not on cached status.
 - **mSOL is displayed as SOL** in some balance views. The rate is ~1.0013, so this understates slightly.
-- **Two dev-only routes** (`/dev/goal-rule`, `/dev/direct-rule`) exist as throwaway test harnesses and should be removed before any real release.
+- **One dev-only route** (`/dev/direct-rule`) remains as a throwaway test harness and should be removed before any real release.
 
 ## Tech stack
 

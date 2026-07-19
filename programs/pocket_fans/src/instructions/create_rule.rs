@@ -1,4 +1,5 @@
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::program_option::COption;
 use anchor_spl::token::{self, Approve, Mint, Token, TokenAccount};
 
 use crate::constants::{
@@ -16,9 +17,12 @@ use crate::state::{ActionType, Rule, TriggerType, UserVault};
 /// `execute_rule` later requires the CALLER (this same owner) to sign, gated
 /// only by `Clock::unix_timestamp >= match_end_ts` — no oracle, no admin key.
 ///
-/// Delegation is bounded: we approve exactly `amount_usdc * max_executions`, so
-/// the program can never pull more than the user opted into. `revoke_rule`
-/// removes the delegation entirely.
+/// Delegation is bounded and CUMULATIVE: this rule's own need is
+/// `amount_usdc * max_executions`, and we approve the running total across all of
+/// the owner's active rules — never more. SPL `approve` overwrites rather than
+/// adds, so approving only this rule's need would wipe out every other active
+/// rule's allowance; see the accumulation comment in the handler.
+/// `revoke_rule` subtracts this rule's share back out again.
 #[derive(Accounts)]
 pub struct CreateRule<'info> {
     #[account(mut)]
@@ -115,9 +119,46 @@ pub fn handler(
         }
     };
 
-    // Bounded delegation = per-execution amount * max_executions (raw devUSDC units).
-    let delegated_amount = amount_usdc
+    // This rule's own bounded need = per-execution amount * max_executions.
+    let this_rule_need = amount_usdc
         .checked_mul(max_executions as u64)
+        .ok_or(PocketFansError::MathOverflow)?;
+
+    // ACCUMULATE, never overwrite.
+    //
+    // SPL `approve` REPLACES the delegation rather than adding to it, and a token
+    // account holds exactly one delegate with one amount. Approving only this
+    // rule's need therefore silently destroyed every other active rule's
+    // allowance on the same wallet — they'd later fail their delegated pull with
+    // SPL OwnerMismatch. The self-claim paths could paper over it (the owner is
+    // signing, so the client can re-approve in the same transaction), but the
+    // permissionless keeper path CANNOT: it never holds the owner's signature.
+    //
+    // So we read the CURRENT delegation off the token account and add to it. The
+    // token account is the single source of truth that actually governs the pull,
+    // and this keeps `delegated_amount` equal to the sum of what every active rule
+    // still needs.
+    //
+    // Only accumulate when the existing delegate is already OUR vault. If it is
+    // unset, or points anywhere else, we start from zero rather than inheriting an
+    // unrelated allowance.
+    //
+    // Race-safety: Anchor deserializes accounts at instruction entry and Solana
+    // executes transactions sequentially per account, so this read-modify-write is
+    // atomic against concurrent transactions. Two creates in flight cannot lose an
+    // update — the second observes the first's result. An execution in between is
+    // also safe: it decrements `delegated_amount` by exactly the `amount_usdc` it
+    // pulled while incrementing that rule's `executions_done`, so the invariant
+    // "delegated_amount == sum(remaining need across active rules)" is preserved
+    // on both sides.
+    let vault_key = ctx.accounts.vault.key();
+    let existing_delegation = if ctx.accounts.owner_usdc_ata.delegate == COption::Some(vault_key) {
+        ctx.accounts.owner_usdc_ata.delegated_amount
+    } else {
+        0
+    };
+    let new_total_delegation = existing_delegation
+        .checked_add(this_rule_need)
         .ok_or(PocketFansError::MathOverflow)?;
 
     // --- persist the rule ---
@@ -143,7 +184,8 @@ pub fn handler(
         .ok_or(PocketFansError::MathOverflow)?;
 
     // --- grant SPL delegation to the vault PDA (delegate = vault) ---
-    // Signed by the owner (they own the USDC account). Same raw units as above.
+    // Signed by the owner (they own the USDC account). Approves the ACCUMULATED
+    // total computed above, not just this rule's need — see the comment there.
     let cpi_ctx = CpiContext::new(
         ctx.accounts.token_program.key(),
         Approve {
@@ -152,15 +194,17 @@ pub fn handler(
             authority: ctx.accounts.owner.to_account_info(),
         },
     );
-    token::approve(cpi_ctx, delegated_amount)?;
+    token::approve(cpi_ctx, new_total_delegation)?;
 
     msg!(
-        "Rule {} created (match {}, claimable after unix_ts {}, delegated {} raw devUSDC units to vault {})",
+        "Rule {} created (match {}, claimable after unix_ts {}); delegation to vault {} raised {} -> {} raw devUSDC units (this rule needs {})",
         rule_id,
         match_id,
         match_end_ts,
-        delegated_amount,
-        vault.key()
+        vault.key(),
+        existing_delegation,
+        new_total_delegation,
+        this_rule_need
     );
     Ok(())
 }
