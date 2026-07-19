@@ -232,63 +232,6 @@ export function useFanApp() {
     return sig;
   }, [address, connection, fixtures, refresh, run]);
 
-  // TEMPORARY DEV TEST HARNESS — used ONLY by /dev/direct-rule. DELETE both
-  // together (see that route's header comment).
-  //
-  // Identical to createChallenge above — same TeamWin + SwapAndSave encoding,
-  // same ATA pre-creation, same ixCreateRule call — with exactly two overrides:
-  //   1. match_end_ts = now + guardSecs (default 60) instead of the fixture's
-  //      kickoff + MATCH_END_BUFFER_SECS, so the on-chain time guard can be
-  //      waited out in a minute rather than hours.
-  //   2. match_id is synthetic (Date.now()) since there is no real fixture.
-  //      match_id is display/dedup only and never verified on-chain, so this is
-  //      safe — but it does mean isMatchFinished() will never flag these rules.
-  // Everything downstream (claimChallenge -> ixExecuteRuleDirect) is the REAL
-  // path, which is the entire point of the harness.
-  const createTimedTestChallenge = useCallback(async (
-    teamId: number, amountStr: string, guardSecs: number,
-    actionKind: "SwapAndSave" | "SwapStakeAndSave" = "SwapAndSave",
-  ) => {
-    if (!address) return null;
-    const owner = new PublicKey(address);
-    const amountUsdc = BigInt(Math.round(Number(amountStr) * 10 ** DEVUSDC_DECIMALS));
-    const sig = await run("Setting up your test challenge", async (onSent) => {
-      if (amountUsdc <= 0n) throw new Error("Enter an amount greater than 0");
-      if (!Number.isFinite(guardSecs) || guardSecs < 1) throw new Error("Guard seconds must be at least 1");
-      const matchId = BigInt(Date.now());
-      const matchEndTs = BigInt(Math.floor(Date.now() / 1000) + Math.round(guardSecs));
-
-      const ixs: TransactionInstruction[] = [];
-      const uv = await getUserVault(connection, owner);
-      if (!uv.exists) ixs.push(ixInitializeVault(owner));
-      const usdcAta = getAssociatedTokenAddressSync(DEVUSDC_MINT, owner);
-      if (!(await connection.getAccountInfo(usdcAta))) {
-        ixs.push(createAssociatedTokenAccountIdempotentInstruction(owner, usdcAta, owner, DEVUSDC_MINT));
-      }
-      const vault = vaultPda(owner);
-      // Vault USDC is the swap INPUT for both actions, so it is always needed.
-      // Vault wSOL is only the swap OUTPUT for the DCA path — the staking path
-      // swaps into the ephemeral stake_wsol PDA instead, and its mSOL now lands
-      // in the OWNER's ATA (created at claim time by claimStakeChallenge), so a
-      // staking rule needs no other vault account.
-      const vaultMints = actionKind === "SwapStakeAndSave" ? [DEVUSDC_MINT] : [DEVUSDC_MINT, WSOL_MINT];
-      for (const mint of vaultMints) {
-        const vaultAta = ata(mint, vault);
-        if (!(await connection.getAccountInfo(vaultAta))) {
-          ixs.push(createAssociatedTokenAccountIdempotentInstruction(owner, vaultAta, vault, mint));
-        }
-      }
-      ixs.push(ixCreateRule({
-        owner, vaultTotalRules: uv.totalRules, trigger: { kind: "TeamWin", teamId },
-        amountUsdc, maxSlippageBps: DEFAULT_MAX_SLIPPAGE_BPS, maxExecutions: DEFAULT_MAX_EXECUTIONS,
-        matchId, matchEndTs, actionKind,
-      }));
-      return submit(ixs, onSent);
-    });
-    if (sig) await refresh();
-    return sig;
-  }, [address, connection, refresh, run]);
-
   // AUTO STAKE (SwapStakeAndSave). A deliberate SIBLING of createChallenge, not a
   // flag on it — same TeamWin self-claim trust model and same delegated USDC
   // amount, but the rule's action is SwapStakeAndSave (claimed later by
@@ -612,7 +555,5 @@ export function useFanApp() {
     sol, usdc, savedSol, savedMsol, savedDcaSol, teams, activeTeams, challenges, teamName, isMatchFinished,
     txState, resetTx, busy, refresh, loadError,
     createChallenge, createStakeChallenge, createGoalChallenge, cancelChallenge, withdrawSavings, withdrawStakedSavings, claimChallenge, claimStakeChallenge, getDevUsdc,
-    // TEMPORARY — /dev/direct-rule harness only. Delete with that route.
-    createTimedTestChallenge,
   };
 }

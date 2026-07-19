@@ -93,7 +93,23 @@ Instruction-level transaction signatures and verification steps are in [DEVNET.m
 - **The keeper loop is off by default** (`GOAL_WATCH_ENABLED=false`), gated on keeper funding and TxLINE stat-validation access.
 - **A stuck fixture status is possible.** If the poller is down when a match finalises, its cached status can remain `live` indefinitely. This affects display only — claims are gated on the rule's own `match_end_ts`, not on cached status.
 - **mSOL is displayed as SOL** in some balance views. The rate is ~1.0013, so this understates slightly.
-- **One dev-only route** (`/dev/direct-rule`) remains as a throwaway test harness and should be removed before any real release.
+
+## Recently fixed
+
+**Shared SPL delegation (fixed 2026-07-19).** `create_rule` used to `approve`
+only the new rule's own need — but SPL `approve` *overwrites* rather than
+accumulates, and a token account holds one delegate with one amount, so creating
+a challenge silently destroyed every other active rule's allowance. `revoke_rule`
+made it worse by clearing the delegation outright when any single rule was
+cancelled. Affected rules then failed their delegated pull with SPL
+`OwnerMismatch`, and because the permissionless keeper never holds the owner's
+signature, the keeper path could not work around it.
+
+`create_rule` now reads the current delegation and **adds** to it; `revoke_rule`
+**subtracts** only that rule's outstanding share, clearing the delegate only when
+the remainder reaches zero. Verified with a regression test checked against both
+old and new bytecode, then against the deployed program on devnet, and every
+already-affected rule was repaired live.
 
 ## Tech stack
 
