@@ -33,6 +33,7 @@ export const DISC = {
   execute_rule_direct: [156, 227, 233, 110, 247, 23, 64, 62],
   execute_rule_verified: [109, 158, 73, 235, 69, 145, 96, 155],
   execute_rule_staked: [230, 120, 146, 64, 213, 216, 43, 197],
+  execute_rule_staked_direct: [135, 212, 228, 85, 247, 150, 62, 206],
 } as const;
 
 // --- Marinade liquid staking (DEVNET) — accounts forwarded to execute_rule_staked ---

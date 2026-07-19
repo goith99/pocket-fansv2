@@ -241,6 +241,66 @@ export function ixExecuteRuleDirect(args: {
 // ExecuteRuleStaked in programs/pocket_fans/src/instructions/execute_rule_staked.rs
 // EXACTLY (re-verified against target/idl/pocket_fans.json). Marinade addresses
 // come from constants.ts and are re-asserted on-chain.
+// ===========================================================================
+// execute_rule_staked_direct — SwapStakeAndSave, DIRECT-TO-OWNER
+// ===========================================================================
+// Direct-to-owner variant of ixExecuteRuleStaked below. IDENTICAL 28-account
+// list except slot 10: the Marinade deposit's `mint_to` is the OWNER's mSOL ATA
+// instead of the vault's, so the minted mSOL lands in the wallet in ONE
+// instruction with no chained withdraw. The vault_sol PDA is still the deposit's
+// `transfer_from` authority (it signs via invoke_signed inside the program) —
+// verified on devnet that Marinade does not require `mint_to` to be owned by
+// that authority. Order mirrors ExecuteRuleStakedDirect in
+// programs/pocket_fans/src/instructions/execute_rule_staked_direct.rs exactly
+// (cross-checked against target/idl/pocket_fans.json).
+//
+// NOTE: owner_msol_ata must already exist — the instruction declares it as a
+// plain Account<TokenAccount>. claimStakeChallenge creates it idempotently in
+// the same transaction.
+export function ixExecuteRuleStakedDirect(args: {
+  owner: PublicKey; ruleId: number;
+  tickArray0: PublicKey; tickArray1: PublicKey; tickArray2: PublicKey;
+  whirlpoolOracle: PublicKey;
+}): TransactionInstruction {
+  const vault = vaultPda(args.owner);
+  const rule = rulePda(vault, args.ruleId);
+  const data = Buffer.concat([disc(DISC.execute_rule_staked_direct), u16(args.ruleId)]);
+  return new TransactionInstruction({
+    programId: PROGRAM_ID,
+    keys: [
+      m(args.owner, true, true),                          //  0 owner (signer)
+      m(vault, false, false),                             //  1 vault
+      m(rule, false, true),                               //  2 rule
+      m(DEVUSDC_MINT, false, false),                      //  3 usdc_mint
+      m(WSOL_MINT, false, false),                         //  4 wsol_mint
+      m(MSOL_MINT, false, true),                          //  5 msol_mint
+      m(ata(DEVUSDC_MINT, args.owner), false, true),      //  6 owner_usdc_ata
+      m(ata(DEVUSDC_MINT, vault), false, true),           //  7 vault_usdc_ata
+      m(stakeWsolPda(args.owner, args.ruleId), false, true), // 8 stake_wsol (PDA, init'd)
+      m(vaultSolPda(args.owner), false, true),            //  9 vault_sol (PDA)
+      m(ata(MSOL_MINT, args.owner), false, true),         // 10 owner_msol_ata <-- OWNER's, not the vault's
+      m(WHIRLPOOL, false, true),                          // 11 whirlpool
+      m(WHIRLPOOL_VAULT_A, false, true),                  // 12 whirlpool_token_vault_a
+      m(WHIRLPOOL_VAULT_B, false, true),                  // 13 whirlpool_token_vault_b
+      m(args.tickArray0, false, true),                    // 14 tick_array_0
+      m(args.tickArray1, false, true),                    // 15 tick_array_1
+      m(args.tickArray2, false, true),                    // 16 tick_array_2
+      m(args.whirlpoolOracle, false, true),               // 17 whirlpool_oracle
+      m(WHIRLPOOL_PROGRAM, false, false),                 // 18 whirlpool_program
+      m(MARINADE_STATE, false, true),                     // 19 marinade_state
+      m(MARINADE_LIQ_POOL_SOL_LEG, false, true),          // 20 marinade_liq_pool_sol_leg
+      m(MARINADE_LIQ_POOL_MSOL_LEG, false, true),         // 21 marinade_liq_pool_msol_leg
+      m(MARINADE_LIQ_POOL_MSOL_LEG_AUTHORITY, false, false), // 22 ..._authority
+      m(MARINADE_RESERVE, false, true),                   // 23 marinade_reserve
+      m(MARINADE_MSOL_MINT_AUTHORITY, false, false),      // 24 marinade_msol_mint_authority
+      m(MARINADE_PROGRAM, false, false),                  // 25 marinade_program
+      m(TOKEN_PROGRAM, false, false),                     // 26 token_program
+      m(SYSTEM_PROGRAM, false, false),                    // 27 system_program
+    ],
+    data,
+  });
+}
+
 export function ixExecuteRuleStaked(args: {
   owner: PublicKey; ruleId: number;
   tickArray0: PublicKey; tickArray1: PublicKey; tickArray2: PublicKey;

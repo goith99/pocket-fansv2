@@ -20,7 +20,7 @@ import {
 } from "@/lib/constants";
 import {
   vaultPda, ata, ixInitializeVault, ixCreateRule, ixRevokeRule, ixWithdrawFromVault,
-  ixExecuteRuleDirect, ixExecuteRuleStaked, ticksForBToA, getUserVault, getUserRules, getRule, tokenUiBalance, RuleView,
+  ixExecuteRuleDirect, ixExecuteRuleStakedDirect, ticksForBToA, getUserVault, getUserRules, getRule, tokenUiBalance, RuleView,
   ixWrapSol, ixSyncNative, ixSwapSolToUsdc, ticksForAToB, estimateUsdcOut,
 } from "@/lib/pf";
 import { TEAM_BY_ID } from "@/lib/flags";
@@ -387,21 +387,28 @@ export function useFanApp() {
     const owner = new PublicKey(address);
     const sig = await run("Claiming your staked savings", async (onSent) => {
       const { ta0, ta1, ta2, whirlpoolOracle } = await ticksForBToA(connection);
-      // execute_rule_staked runs the Orca swap CPI AND the Marinade deposit CPI,
-      // plus an ephemeral account init — well past the 200k default.
+      // execute_rule_staked_direct runs the Orca swap CPI AND the Marinade deposit
+      // CPI, plus an ephemeral account init — well past the 200k default.
+      // Measured ~120k on devnet; 700k leaves generous headroom.
       const ixs: TransactionInstruction[] = [
         ComputeBudgetProgram.setComputeUnitLimit({ units: 700_000 }),
       ];
-      // vault mSOL ATA (Marinade mint_to dest) is normally pre-created at
-      // challenge creation; recreate idempotently in case it's missing.
-      const vault = vaultPda(owner);
-      const vaultMsol = ata(MSOL_MINT, vault);
-      if (!(await connection.getAccountInfo(vaultMsol))) {
-        ixs.push(createAssociatedTokenAccountIdempotentInstruction(owner, vaultMsol, vault, MSOL_MINT));
+      // OWNER mSOL ATA — the Marinade `mint_to` destination. The instruction
+      // declares it as a plain Account<TokenAccount> that must already exist, so
+      // create it idempotently here, exactly as claimChallenge does for the
+      // owner's wSOL ATA. (The VAULT's mSOL ATA is no longer needed by the claim:
+      // nothing transits the vault now. Any mSOL already sitting there from
+      // earlier vault-landing claims stays withdrawable via withdrawStakedSavings.)
+      const ownerMsol = ata(MSOL_MINT, owner);
+      if (!(await connection.getAccountInfo(ownerMsol))) {
+        ixs.push(createAssociatedTokenAccountIdempotentInstruction(owner, ownerMsol, owner, MSOL_MINT));
       }
       // Same shared-delegation repair as claimChallenge — see approveForRule().
       ixs.push(await approveForRule(owner, ruleId));
-      ixs.push(ixExecuteRuleStaked({ owner, ruleId, tickArray0: ta0, tickArray1: ta1, tickArray2: ta2, whirlpoolOracle }));
+      // ONE instruction: swap -> unwrap -> Marinade deposit, with the minted mSOL
+      // landing DIRECTLY in the owner's wallet. Replaces the vault-landing
+      // ixExecuteRuleStaked, which required a separate withdraw to collect.
+      ixs.push(ixExecuteRuleStakedDirect({ owner, ruleId, tickArray0: ta0, tickArray1: ta1, tickArray2: ta2, whirlpoolOracle }));
       return submit(ixs, onSent);
     });
     if (sig) await refresh();
