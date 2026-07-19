@@ -92,6 +92,19 @@ pub mod pocket_fans {
         instructions::execute_rule_staked::handler(ctx, rule_id)
     }
 
+    /// Rule OWNER ONLY (self-claim), DIRECT-TO-OWNER variant of
+    /// execute_rule_staked: identical delegated USDC pull, Orca swap, unwrap and
+    /// vault-signed Marinade deposit, but the minted mSOL lands straight in the
+    /// owner's own mSOL ATA instead of the vault's — one instruction, no
+    /// withdraw. execute_rule_staked is untouched. See
+    /// instructions/execute_rule_staked_direct.rs.
+    pub fn execute_rule_staked_direct(
+        ctx: Context<ExecuteRuleStakedDirect>,
+        rule_id: u16,
+    ) -> Result<()> {
+        instructions::execute_rule_staked_direct::handler(ctx, rule_id)
+    }
+
     /// User: deactivate a rule and clear its SPL delegation.
     pub fn revoke_rule(ctx: Context<RevokeRule>, rule_id: u16) -> Result<()> {
         instructions::revoke_rule::handler(ctx, rule_id)
