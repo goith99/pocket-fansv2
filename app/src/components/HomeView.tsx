@@ -6,14 +6,13 @@ import RetryNotice from "./RetryNotice";
 import DevUsdcFaucetCard from "./DevUsdcFaucetCard";
 import type { RuleView } from "@/lib/pf";
 
-// Goal scored is DISABLED: GoalScored rules are claimed by the permissionless
-// keeper (execute_rule_verified), which pulls USDC via the same single shared SPL
-// delegation every other rule uses. When that delegation is overwritten,
-// exhausted or revoked by another rule, a keeper claim fails silently with no
-// user-facing signal. The self-claim paths repair this by prepending an approve
-// (see approveForRule in useFanApp.ts); the keeper cannot. Creation is also hard-
-// blocked in createGoalChallenge itself — see GOALSCORED_CREATION_ENABLED in
-// constants.ts. Existing on-chain GoalScored rules are untouched.
+// Goal scored is DISABLED in the UI: GoalScored rules are claimed by the
+// permissionless keeper (execute_rule_verified), which pulls USDC via the same
+// single shared SPL delegation every other rule uses. When that delegation is
+// overwritten/exhausted/revoked by another rule, a keeper claim fails silently
+// with no user-facing signal. Re-enable only once create_rule/revoke_rule's
+// shared-delegation model is properly fixed. Existing on-chain GoalScored rules
+// are untouched — this only stops the UI creating new ones.
 const WHEN = [
   { label: "Team wins", state: "active" as const },
   { label: "Goal scored", state: "soon" as const },
@@ -67,7 +66,15 @@ function BalanceCard({ label, icon, value, unit }: { label: string; icon: React.
   );
 }
 
-function SavedCard({ value, celebrate, stakedMsol }: { value: string; celebrate: boolean; stakedMsol?: number | null }) {
+// Two-line savings summary, SOL amounts only (no dollar figures anywhere).
+//
+//  · Staking = the vault's live mSOL balance. mSOL is shown as SOL: it's a
+//    1:1-ish liquid staking derivative and the exchange rate is not worth
+//    surfacing to a consumer here.
+//  · DCA = a LIFETIME ESTIMATE reconstructed from rule history at today's pool
+//    price (see savedDcaSol in useFanApp). It is NOT a balance and NOT exact,
+//    which is why it carries a "~" and the caption below.
+function SavedCard({ stakingSol, dcaSol, celebrate }: { stakingSol: string; dcaSol: string; celebrate: boolean }) {
   return (
     <div className={`card relative overflow-hidden p-4 ${celebrate ? "animate-pop-in ring-2 ring-gold" : ""}`}>
       {celebrate && (
@@ -85,26 +92,32 @@ function SavedCard({ value, celebrate, stakedMsol }: { value: string; celebrate:
         <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-faint"><PiggyBank size={13} />Saved</div>
         <Trophy size={15} className="text-gold" />
       </div>
-      <div className="mt-1.5 flex items-baseline gap-1">
-        <span className="font-mono text-[26px] font-bold tabular-nums text-green-deep">{value}</span>
-        <span className="text-sm font-semibold text-muted">SOL</span>
+
+      <div className="mt-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-faint">Staking</div>
+      <div className="flex items-baseline gap-1">
+        <span className="font-mono text-[22px] font-bold tabular-nums text-green-deep">{stakingSol}</span>
+        <span className="text-xs font-semibold text-muted">SOL</span>
       </div>
-      {stakedMsol != null && stakedMsol > 0 && (
-        <div className="mt-0.5 text-[11px] font-semibold text-muted">+ {stakedMsol.toFixed(4)} mSOL staked</div>
-      )}
+
+      <div className="mt-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-faint">DCA</div>
+      <div className="flex items-baseline gap-1">
+        <span className="font-mono text-[22px] font-bold tabular-nums text-green-deep">~{dcaSol}</span>
+        <span className="text-xs font-semibold text-muted">SOL</span>
+      </div>
+      <div className="mt-0.5 text-[10px] leading-tight text-faint">estimated at today’s rate</div>
     </div>
   );
 }
 
 export default function HomeView({
-  greetingName, balanceUsd, savedSol, savedMsol, selectedTeam, amount, onAmountChange, onOpenPicker, onCreate, creating, challenges, teamName, celebrate, loadError, onRetry,
+  greetingName, balanceUsd, savedMsol, savedDcaSol, selectedTeam, amount, onAmountChange, onOpenPicker, onCreate, creating, challenges, teamName, celebrate, loadError, onRetry,
   solBalance, faucetSolAmount, onFaucetSolAmountChange, onGetDevUsdc, faucetBusy,
   saveAction, onSaveActionChange,
 }: {
   greetingName: string;
   balanceUsd: number | null;
-  savedSol: number | null;
   savedMsol: number | null;
+  savedDcaSol: number | null;
   selectedTeam: { id: number; name: string } | null;
   amount: string;
   onAmountChange: (v: string) => void;
@@ -124,7 +137,6 @@ export default function HomeView({
   onGetDevUsdc: () => void;
   faucetBusy: boolean;
 }) {
-  const total = (Number(amount) * 3 || 0).toFixed(2);
   const canCreate = !!selectedTeam && Number(amount) > 0 && !creating;
   // Home shows just the single most-recent challenge; full list lives under "See all".
   const recent = challenges.slice(0, 1);
@@ -148,7 +160,11 @@ export default function HomeView({
       {/* balances float over the hero */}
       <div className="-mt-11 grid grid-cols-2 gap-3">
         <BalanceCard label="Balance" icon={<Coins size={13} />} value={balanceUsd != null ? `$${balanceUsd.toFixed(2)}` : loadError ? "—" : "…"} />
-        <SavedCard value={savedSol != null ? savedSol.toFixed(4) : loadError ? "—" : "…"} celebrate={celebrate} stakedMsol={savedMsol} />
+        <SavedCard
+          stakingSol={savedMsol != null ? savedMsol.toFixed(4) : loadError ? "—" : "…"}
+          dcaSol={savedDcaSol != null ? savedDcaSol.toFixed(4) : loadError ? "—" : "…"}
+          celebrate={celebrate}
+        />
       </div>
 
       {loadError && onRetry && <RetryNotice onRetry={onRetry} />}
@@ -199,7 +215,7 @@ export default function HomeView({
         <p className="mt-1.5 text-[13px] text-muted">
           {saveAction === "stake"
             ? "Your winnings are staked into SOL (mSOL) — earns staking yield while saved."
-            : "Your winnings are swapped into SOL and set aside in your vault."}
+            : "Your winnings are swapped into SOL and paid straight into your wallet."}
         </p>
 
         <div className="mt-2.5 flex items-center gap-3">
@@ -209,10 +225,6 @@ export default function HomeView({
           </div>
           <span className="text-[15px] text-muted">each time they win</span>
         </div>
-
-        <p className="mt-3 rounded-xl bg-green-tint px-3 py-2.5 text-[13px] font-medium text-green-deep">
-          You’re allowing up to <b>${total}</b> total — you stay in control.
-        </p>
 
         <button className="btn-primary mt-3" disabled={!canCreate} onClick={onCreate}>
           {creating ? "Working…" : selectedTeam ? `Create challenge · ${selectedTeam.name} wins` : "Create challenge"}

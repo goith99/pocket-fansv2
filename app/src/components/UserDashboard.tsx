@@ -24,9 +24,12 @@ export default function UserDashboard() {
   const [celebrate, setCelebrate] = useState(false);
   const prevSaved = useRef<number | null>(null);
 
-  // celebration when savings land (savedSol increases)
+  // Celebration when staked savings land (savedMsol increases). Keyed to mSOL
+  // rather than the vault's wSOL: Auto DCA claims now land directly in the
+  // user's wallet (execute_rule_direct), so the vault wSOL balance no longer
+  // moves on a DCA claim and would never fire this.
   useEffect(() => {
-    const s = app.savedSol;
+    const s = app.savedMsol;
     if (s == null) return;
     if (prevSaved.current != null && s > prevSaved.current + 1e-9) {
       setCelebrate(true);
@@ -34,7 +37,7 @@ export default function UserDashboard() {
       return () => clearTimeout(t);
     }
     prevSaved.current = s;
-  }, [app.savedSol]);
+  }, [app.savedMsol]);
 
   if (!app.ready) return <div className="py-20 text-center text-muted">Loading…</div>;
   // Logged-out visitors get the full landing page (desktop + mobile responsive).
@@ -47,8 +50,8 @@ export default function UserDashboard() {
       <HomeView
         greetingName={firstName(app.user)}
         balanceUsd={app.usdc}
-        savedSol={app.savedSol}
         savedMsol={app.savedMsol}
+        savedDcaSol={app.savedDcaSol}
         selectedTeam={selectedTeam}
         amount={amount}
         onAmountChange={setAmount}

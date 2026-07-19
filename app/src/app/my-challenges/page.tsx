@@ -46,43 +46,65 @@ export default function MyChallengesPage() {
 
       {app.loadError && <RetryNotice onRetry={app.refresh} />}
 
-      {/* savings summary */}
+      {/* Savings summary — two lines, SOL only, no dollar figures.
+          Mirrors SavedCard in HomeView; kept as its own markup here because this
+          page's version carries the Withdraw controls the Home card doesn't. */}
       <div className="card p-4">
+        {/* Staking = the vault's live mSOL balance (execute_rule_staked ->
+            Marinade). Shown as SOL: mSOL is ~1:1 and the rate isn't worth
+            surfacing here. Always visible so the two lines stay a stable pair. */}
         <div className="flex items-center justify-between gap-3">
           <div>
-            {/* "Saved via DCA" = the vault's wSOL balance (app.savedSol). */}
-            <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-faint"><PiggyBank size={13} /> Saved via DCA</div>
+            <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-faint"><Coins size={13} /> Saved · Staking</div>
             <div className="mt-1 flex items-baseline gap-1">
-              <span className="font-mono text-2xl font-bold tabular-nums text-green-deep">{app.savedSol != null ? app.savedSol.toFixed(4) : app.loadError ? "—" : "…"}</span>
+              <span className="font-mono text-2xl font-bold tabular-nums text-green-deep">{app.savedMsol != null ? app.savedMsol.toFixed(4) : app.loadError ? "—" : "…"}</span>
               <span className="text-sm font-semibold text-muted">SOL</span>
             </div>
           </div>
-          <button className="btn-ghost" disabled={app.busy || !hasSavings} onClick={() => void app.withdrawSavings()}>
-            Withdraw
-          </button>
-        </div>
-
-        {/* "Saved via Staking" = the vault's mSOL balance (app.savedMsol), from
-            Auto Stake challenges (execute_rule_staked -> Marinade). Only shown
-            once there's staked mSOL, so DCA-only users aren't confused by it. */}
-        {hasStaked && (
-          <div className="mt-3 flex items-center justify-between gap-3 border-t border-line pt-3">
-            <div>
-              <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-faint"><Coins size={13} /> Saved via Staking</div>
-              <div className="mt-1 flex items-baseline gap-1">
-                <span className="font-mono text-2xl font-bold tabular-nums text-green-deep">{app.savedMsol != null ? app.savedMsol.toFixed(4) : app.loadError ? "—" : "…"}</span>
-                <span className="text-sm font-semibold text-muted">mSOL</span>
-              </div>
-            </div>
-            <button className="btn-ghost" disabled={app.busy || !hasStaked} onClick={() => void app.withdrawStakedSavings()}>
+          {hasStaked && (
+            <button className="btn-ghost" disabled={app.busy} onClick={() => void app.withdrawStakedSavings()}>
               Withdraw
             </button>
+          )}
+        </div>
+
+        {/* DCA = lifetime ESTIMATE from rule history at today's price, not a
+            balance (see savedDcaSol in useFanApp). Auto DCA claims pay straight
+            to the wallet, so there is no vault figure to read. */}
+        <div className="mt-3 border-t border-line pt-3">
+          <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-faint"><PiggyBank size={13} /> Saved · DCA</div>
+          <div className="mt-1 flex items-baseline gap-1">
+            <span className="font-mono text-2xl font-bold tabular-nums text-green-deep">~{app.savedDcaSol != null ? app.savedDcaSol.toFixed(4) : app.loadError ? "—" : "…"}</span>
+            <span className="text-sm font-semibold text-muted">SOL</span>
           </div>
-        )}
+          <div className="mt-0.5 text-[12px] text-muted">
+            Estimated at today’s rate — paid into your wallet as each challenge landed.
+          </div>
+
+          {/* Vault wSOL, folded in UNDER the DCA line rather than given its own
+              row. Two things land here: leftover dust from pre-execute_rule_direct
+              claims (which chained a slippage-floor withdraw and stranded ~5%),
+              and — once Goal Scored rules fire — live GoalScored savings, since
+              execute_rule_verified still pays into vault_wsol_ata. Renders only
+              when there's a balance, and it's the ONLY wSOL withdraw control in
+              the UI, so it must stay reachable. */}
+          {hasSavings && (
+            <div className="mt-2 flex items-center justify-between gap-3 rounded-xl bg-green-tint px-3 py-2">
+              <span className="text-[13px] leading-snug text-green-deep">
+                <b className="font-mono tabular-nums">{app.savedSol != null ? app.savedSol.toFixed(4) : "…"} SOL</b>{" "}
+                is waiting in your vault
+              </span>
+              <button className="btn-ghost shrink-0" disabled={app.busy} onClick={() => void app.withdrawSavings()}>
+                Withdraw
+              </button>
+            </div>
+          )}
+        </div>
+
         {/* what "saving" means — plain-language note, always visible */}
         <p className="mt-3 rounded-xl bg-green-tint px-3 py-2.5 text-[13px] leading-relaxed text-green-deep">
-          Your savings are <b>$SOL</b>. Each claim swaps your own USDC into SOL — like a small,
-          match-day DCA. It’s your money the whole time: nothing is staked, and you can withdraw anytime.
+          Your savings are <b>$SOL</b>. Each challenge swaps your own USDC into SOL — like a small,
+          match-day DCA. It’s your money the whole time, and you can spend it any time.
         </p>
       </div>
 

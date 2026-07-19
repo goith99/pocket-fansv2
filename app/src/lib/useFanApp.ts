@@ -21,7 +21,7 @@ import {
 import {
   vaultPda, ata, ixInitializeVault, ixCreateRule, ixRevokeRule, ixWithdrawFromVault,
   ixExecuteRuleDirect, ixExecuteRuleStakedDirect, ticksForBToA, getUserVault, getUserRules, getRule, tokenUiBalance, RuleView,
-  ixWrapSol, ixSyncNative, ixSwapSolToUsdc, ticksForAToB, estimateUsdcOut,
+  ixWrapSol, ixSyncNative, ixSwapSolToUsdc, ticksForAToB, estimateUsdcOut, estimateWsolOut,
 } from "@/lib/pf";
 import { TEAM_BY_ID } from "@/lib/flags";
 import { useTxFlow } from "@/components/TransactionFlow";
@@ -80,6 +80,15 @@ export function useFanApp() {
   const [usdc, setUsdc] = useState<number | null>(null);
   const [savedSol, setSavedSol] = useState<number | null>(null);
   const [savedMsol, setSavedMsol] = useState<number | null>(null);
+  // LIFETIME DCA ESTIMATE, not a balance. Auto DCA claims now land straight in
+  // the user's wallet (execute_rule_direct), so there is no on-chain figure that
+  // says "you have saved X via DCA" — the SOL is indistinguishable from the rest
+  // of their wallet. We reconstruct it from rule history instead:
+  //   sum(amount_usdc * executions_done) over TeamWin + SwapAndSave rules,
+  // converted at TODAY's pool price. Each execution actually happened at its own
+  // historical price, so this is an approximation and MUST be labelled as one in
+  // the UI (see the "~" and caption in HomeView/my-challenges).
+  const [savedDcaSol, setSavedDcaSol] = useState<number | null>(null);
   const [challenges, setChallenges] = useState<RuleView[]>([]);
   const [loadError, setLoadError] = useState(false);
 
@@ -110,6 +119,19 @@ export function useFanApp() {
       setSavedSol(v?.ui ?? 0);
       setSavedMsol(mv?.ui ?? 0);
       setChallenges(rules);
+
+      // Lifetime DCA estimate — see the savedDcaSol declaration above. Only
+      // TeamWin + SwapAndSave rules count: GoalScored savings still land in the
+      // vault (execute_rule_verified), so they show up in savedSol instead, and
+      // SwapStakeAndSave savings are mSOL (savedMsol).
+      const dcaRaw = rules.reduce((acc, r) => (
+        r.triggerKind === "TeamWin" && r.actionKind === "SwapAndSave" && r.amountUsdc
+          ? acc + BigInt(r.amountUsdc) * BigInt(r.executionsDone)
+          : acc
+      ), 0n);
+      // bufferBps 0 = no slippage haircut; this is a historical estimate, not a
+      // trade quote, so it wants the raw expected output at the current price.
+      setSavedDcaSol(dcaRaw > 0n ? Number(await estimateWsolOut(connection, dcaRaw, 0)) / 1e9 : 0);
       setLoadError(false);
     } catch {
       setLoadError(true);
@@ -209,6 +231,63 @@ export function useFanApp() {
     if (sig) await refresh();
     return sig;
   }, [address, connection, fixtures, refresh, run]);
+
+  // TEMPORARY DEV TEST HARNESS — used ONLY by /dev/direct-rule. DELETE both
+  // together (see that route's header comment).
+  //
+  // Identical to createChallenge above — same TeamWin + SwapAndSave encoding,
+  // same ATA pre-creation, same ixCreateRule call — with exactly two overrides:
+  //   1. match_end_ts = now + guardSecs (default 60) instead of the fixture's
+  //      kickoff + MATCH_END_BUFFER_SECS, so the on-chain time guard can be
+  //      waited out in a minute rather than hours.
+  //   2. match_id is synthetic (Date.now()) since there is no real fixture.
+  //      match_id is display/dedup only and never verified on-chain, so this is
+  //      safe — but it does mean isMatchFinished() will never flag these rules.
+  // Everything downstream (claimChallenge -> ixExecuteRuleDirect) is the REAL
+  // path, which is the entire point of the harness.
+  const createTimedTestChallenge = useCallback(async (
+    teamId: number, amountStr: string, guardSecs: number,
+    actionKind: "SwapAndSave" | "SwapStakeAndSave" = "SwapAndSave",
+  ) => {
+    if (!address) return null;
+    const owner = new PublicKey(address);
+    const amountUsdc = BigInt(Math.round(Number(amountStr) * 10 ** DEVUSDC_DECIMALS));
+    const sig = await run("Setting up your test challenge", async (onSent) => {
+      if (amountUsdc <= 0n) throw new Error("Enter an amount greater than 0");
+      if (!Number.isFinite(guardSecs) || guardSecs < 1) throw new Error("Guard seconds must be at least 1");
+      const matchId = BigInt(Date.now());
+      const matchEndTs = BigInt(Math.floor(Date.now() / 1000) + Math.round(guardSecs));
+
+      const ixs: TransactionInstruction[] = [];
+      const uv = await getUserVault(connection, owner);
+      if (!uv.exists) ixs.push(ixInitializeVault(owner));
+      const usdcAta = getAssociatedTokenAddressSync(DEVUSDC_MINT, owner);
+      if (!(await connection.getAccountInfo(usdcAta))) {
+        ixs.push(createAssociatedTokenAccountIdempotentInstruction(owner, usdcAta, owner, DEVUSDC_MINT));
+      }
+      const vault = vaultPda(owner);
+      // Vault USDC is the swap INPUT for both actions, so it is always needed.
+      // Vault wSOL is only the swap OUTPUT for the DCA path — the staking path
+      // swaps into the ephemeral stake_wsol PDA instead, and its mSOL now lands
+      // in the OWNER's ATA (created at claim time by claimStakeChallenge), so a
+      // staking rule needs no other vault account.
+      const vaultMints = actionKind === "SwapStakeAndSave" ? [DEVUSDC_MINT] : [DEVUSDC_MINT, WSOL_MINT];
+      for (const mint of vaultMints) {
+        const vaultAta = ata(mint, vault);
+        if (!(await connection.getAccountInfo(vaultAta))) {
+          ixs.push(createAssociatedTokenAccountIdempotentInstruction(owner, vaultAta, vault, mint));
+        }
+      }
+      ixs.push(ixCreateRule({
+        owner, vaultTotalRules: uv.totalRules, trigger: { kind: "TeamWin", teamId },
+        amountUsdc, maxSlippageBps: DEFAULT_MAX_SLIPPAGE_BPS, maxExecutions: DEFAULT_MAX_EXECUTIONS,
+        matchId, matchEndTs, actionKind,
+      }));
+      return submit(ixs, onSent);
+    });
+    if (sig) await refresh();
+    return sig;
+  }, [address, connection, refresh, run]);
 
   // AUTO STAKE (SwapStakeAndSave). A deliberate SIBLING of createChallenge, not a
   // flag on it — same TeamWin self-claim trust model and same delegated USDC
@@ -350,12 +429,11 @@ export function useFanApp() {
   // re-approve exactly what THIS rule still needs. The owner is already signing,
   // so no extra prompt. Atomic with the claim, so nothing can race in between.
   //
-  // Scope: the OWNER-SIGNED self-claim paths only (execute_rule,
+  // Scope: the three OWNER-SIGNED self-claim paths only (execute_rule,
   // execute_rule_direct, execute_rule_staked). It CANNOT help
   // execute_rule_verified — the keeper submits that transaction and cannot sign
-  // an approve on the user's behalf, which is why GoalScored creation is blocked
-  // outright (GOALSCORED_CREATION_ENABLED) until create_rule/revoke_rule are
-  // properly fixed.
+  // an approve on the user's behalf, which is why GoalScored stays disabled in
+  // the UI until create_rule/revoke_rule are properly fixed.
   const approveForRule = useCallback(async (owner: PublicKey, ruleId: number): Promise<TransactionInstruction> => {
     const rule = await getRule(connection, owner, ruleId);
     if (!rule) throw new Error("Challenge not found on-chain");
@@ -383,6 +461,10 @@ export function useFanApp() {
       if (!(await connection.getAccountInfo(ownerWsol))) {
         ixs.push(createAssociatedTokenAccountIdempotentInstruction(owner, ownerWsol, owner, WSOL_MINT));
       }
+      // Re-establish the SPL delegation for THIS rule, immediately before the
+      // instruction that consumes it, in the same transaction. See
+      // approveForRule() for why this is necessary.
+      ixs.push(await approveForRule(owner, ruleId));
       // ONE instruction: swap the owner's USDC to wSOL landing DIRECTLY in their
       // wallet. This replaces the old execute_rule + chained withdraw_from_vault
       // pair, which had to withdraw a slippage-floor amount
@@ -390,9 +472,6 @@ export function useFanApp() {
       // claim. Nothing transits the vault now, so there is no floor to estimate
       // and no dust to sweep. WITHDRAW_FLOOR_BUFFER_BPS / ixWithdrawFromVault are
       // still used by the staking path and the manual Withdraw control.
-      // Re-establish the SPL delegation for THIS rule, immediately before the
-      // instruction that consumes it. See approveForRule() above.
-      ixs.push(await approveForRule(owner, ruleId));
       ixs.push(ixExecuteRuleDirect({ owner, ruleId, tickArray0: ta0, tickArray1: ta1, tickArray2: ta2, whirlpoolOracle }));
       return submit(ixs, onSent);
     });
@@ -414,7 +493,7 @@ export function useFanApp() {
       const { ta0, ta1, ta2, whirlpoolOracle } = await ticksForBToA(connection);
       // execute_rule_staked_direct runs the Orca swap CPI AND the Marinade deposit
       // CPI, plus an ephemeral account init — well past the 200k default.
-      // Measured ~120k on devnet; 700k leaves generous headroom.
+      // Measured ~107k on devnet; 700k leaves generous headroom.
       const ixs: TransactionInstruction[] = [
         ComputeBudgetProgram.setComputeUnitLimit({ units: 700_000 }),
       ];
@@ -562,8 +641,10 @@ export function useFanApp() {
 
   return {
     ready, authenticated, login, logout, user, address,
-    sol, usdc, savedSol, savedMsol, teams, activeTeams, challenges, teamName, isMatchFinished,
+    sol, usdc, savedSol, savedMsol, savedDcaSol, teams, activeTeams, challenges, teamName, isMatchFinished,
     txState, resetTx, busy, refresh, loadError,
     createChallenge, createStakeChallenge, createGoalChallenge, cancelChallenge, withdrawSavings, withdrawStakedSavings, claimChallenge, claimStakeChallenge, getDevUsdc,
+    // TEMPORARY — /dev/direct-rule harness only. Delete with that route.
+    createTimedTestChallenge,
   };
 }
