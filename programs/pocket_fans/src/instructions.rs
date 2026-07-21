@@ -10,9 +10,15 @@ pub mod execute_rule;
 pub mod execute_rule_direct;
 pub mod execute_rule_staked;
 pub mod execute_rule_staked_direct;
+pub mod execute_rule_staked_verified_win;
 pub mod execute_rule_verified;
+pub mod execute_rule_verified_win;
 pub mod initialize_vault;
 pub mod revoke_rule;
+/// Shared TeamWinVerified verification core (fixture/stat/full-time pinning +
+/// the Txoracle CPI). Not glob re-exported: no #[derive(Accounts)] of its own,
+/// consumed via `crate::instructions::winverify::verify_team_win`.
+pub mod winverify;
 /// Txoracle CPI interface. Not glob re-exported: it has no #[derive(Accounts)]
 /// context of its own, and its types are consumed via the full path
 /// `crate::instructions::txoracle::...`.
@@ -24,7 +30,9 @@ pub use execute_rule::*;
 pub use execute_rule_direct::*;
 pub use execute_rule_staked::*;
 pub use execute_rule_staked_direct::*;
+pub use execute_rule_staked_verified_win::*;
 pub use execute_rule_verified::*;
+pub use execute_rule_verified_win::*;
 pub use initialize_vault::*;
 pub use revoke_rule::*;
 pub use withdraw_from_vault::*;

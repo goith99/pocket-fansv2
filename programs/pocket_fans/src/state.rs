@@ -97,6 +97,30 @@ pub enum TriggerType {
         stat_key: u32,
         threshold: u8,
     },
+    /// KEEPER + ORACLE path (`execute_rule_verified_win` /
+    /// `execute_rule_staked_verified_win`): "my team won at full time", proven
+    /// rather than self-claimed. Same permissionless-caller + CPI-verdict trust
+    /// model as GoalScored, but with a TWO-stat predicate and a full-time pin.
+    ///
+    /// Distinct from `TeamWin` above on purpose. TeamWin is the time-guarded
+    /// self-claim variant and is untouched; a rule is one or the other for life.
+    ///
+    /// The two stat keys are resolved OFF-CHAIN at create_rule time from the
+    /// fixture's home/away assignment (1 = home goals, 2 = away goals) and
+    /// pinned here, so the on-chain predicate needs no notion of home/away:
+    ///   `team_stat_key` value  -  `opponent_stat_key` value  >  0
+    /// Direction is carried entirely by WHICH key sits in WHICH slot, so backing
+    /// the away side is just the two keys swapped. `team_id` is display/audit
+    /// only — never evaluated on-chain (same discipline as GoalScored).
+    ///
+    /// FULL-TIME PIN: both proven stats must carry `period == FULL_TIME_PERIOD`
+    /// (100, the `game_finalised` status id). This is load-bearing security, not
+    /// cosmetic — see the module docs on execute_rule_verified_win.rs.
+    TeamWinVerified {
+        team_id: u32,
+        team_stat_key: u32,
+        opponent_stat_key: u32,
+    },
     // --- reserved for later phases ---
     // CornerKick { team_id: u32, stat_key: u32, threshold: u8 },
     // YellowCard { team_id: u32, stat_key: u32, threshold: u8 },
@@ -149,6 +173,7 @@ impl TriggerType {
         match self {
             TriggerType::TeamWin { team_id } => *team_id,
             TriggerType::GoalScored { team_id, .. } => *team_id,
+            TriggerType::TeamWinVerified { team_id, .. } => *team_id,
         }
     }
 }

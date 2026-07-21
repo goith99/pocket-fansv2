@@ -105,6 +105,33 @@ pub mod pocket_fans {
         instructions::execute_rule_staked_direct::handler(ctx, rule_id)
     }
 
+    /// TeamWinVerified trigger + SwapAndSave — callable by ANYONE (the keeper,
+    /// or the owner as a manual fallback). No signer identity is trusted; the
+    /// Txoracle `validate_stat_v2` verdict over a FULL-TIME (period 100) two-stat
+    /// proof is the only gate, and the swapped wSOL settles straight into the
+    /// owner's wallet. The self-claim TeamWin path is untouched. See
+    /// instructions/execute_rule_verified_win.rs and instructions/winverify.rs.
+    pub fn execute_rule_verified_win(
+        ctx: Context<ExecuteRuleVerifiedWin>,
+        rule_id: u16,
+        payload: StatValidationInput,
+    ) -> Result<()> {
+        instructions::execute_rule_verified_win::handler(ctx, rule_id, payload)
+    }
+
+    /// TeamWinVerified trigger + SwapStakeAndSave — the Auto Stake twin of
+    /// `execute_rule_verified_win`: same permissionless-caller + oracle-verdict
+    /// gate, but the swapped SOL is deposited into Marinade and the minted mSOL
+    /// settles straight into the owner's wallet. See
+    /// instructions/execute_rule_staked_verified_win.rs.
+    pub fn execute_rule_staked_verified_win(
+        ctx: Context<ExecuteRuleStakedVerifiedWin>,
+        rule_id: u16,
+        payload: StatValidationInput,
+    ) -> Result<()> {
+        instructions::execute_rule_staked_verified_win::handler(ctx, rule_id, payload)
+    }
+
     /// User: deactivate a rule and clear its SPL delegation.
     pub fn revoke_rule(ctx: Context<RevokeRule>, rule_id: u16) -> Result<()> {
         instructions::revoke_rule::handler(ctx, rule_id)

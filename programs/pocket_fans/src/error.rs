@@ -58,4 +58,12 @@ pub enum PocketFansError {
     WrongMarinadeProgram,
     #[msg("Swap produced no wSOL to stake")]
     NothingToStake,
+
+    // --- TeamWinVerified trigger (execute_rule_verified_win / _staked_) ---
+    #[msg("Proven stat is not from full time (period != 100) — mid-match proofs cannot settle a win")]
+    NotFullTime,
+    #[msg("Proven scoreline does not show the backed team ahead at full time")]
+    NotAWin,
+    #[msg("Oracle verdict and proven scoreline disagree — refusing to settle")]
+    PredicateDisagreement,
 }

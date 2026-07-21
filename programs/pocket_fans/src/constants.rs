@@ -85,6 +85,25 @@ pub const VALIDATE_STAT_V2_DISCRIMINATOR: [u8; 8] = [208, 215, 194, 214, 241, 71
 pub const STAT_KEY_HOME_GOALS: u32 = 1;
 pub const STAT_KEY_AWAY_GOALS: u32 = 2;
 
+/// The `period` value a proven stat carries at FULL TIME.
+///
+/// VERIFIED against live TxLINE data on 2026-07-21, not assumed. A proven stat's
+/// `period` field mirrors the underlying score event's `StatusId`, which walks
+/// the match phases (2 = 1st half, 4/7 = later phases, 9 = extra time, 0 after
+/// the post-match `disconnected` event) and is exactly 100 on the
+/// `game_finalised` event. Confirmed 100 at the final whistle across 6 finished
+/// World Cup fixtures (18257739, 18257865, 18237038, 18241006, 18222446,
+/// 18213979).
+///
+/// WHY THIS IS LOAD-BEARING: "team won" is only true at full time. Mid-match
+/// proofs are equally well-formed and would pass the oracle's Merkle validation,
+/// but they prove a DIFFERENT scoreline — fixture 18257739 proves 2-0 at seq
+/// 1261 (period 9, extra time) and 1-0 at the final whistle, because a goal was
+/// disallowed by VAR. Without this pin, a keeper could pick whichever in-match
+/// seq happened to have the backed team ahead and fire a rule for a team that
+/// went on to lose. This is the guard that makes the trigger sound.
+pub const FULL_TIME_PERIOD: i32 = 100;
+
 // ---------------------------------------------------------------------------
 // Marinade liquid staking (DEVNET) — CPI target for the SwapStakeAndSave action
 // (execute_rule_staked). Marinade uses the SAME addresses on devnet and mainnet
