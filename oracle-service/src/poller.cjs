@@ -94,6 +94,90 @@ async function refreshForward() {
   }
 }
 
+/**
+ * Resolve one fixture, snapshot-first. Returns { res, health } where health is
+ * one of 'ok' | 'empty' | 'denied' | 'error' — see reportTickHealth below.
+ *
+ * /scores/snapshot is primary because /scores/historical only serves a fixture
+ * between two weeks and SIX HOURS after its start time (see the block comment
+ * on getFinishedResult). Polling historical meant every fixture sat at 'live'
+ * for six hours after kickoff no matter how fast we polled.
+ *
+ * getFinishedResult stays as the fallback, tried only when the snapshot gives
+ * us nothing usable. It reads a different backing store, so it can still answer
+ * when snapshot 403s or comes back empty — but it can equally return null
+ * purely because we are inside its six-hour blackout, so a null from it is
+ * never evidence that the match is unfinished.
+ */
+async function resolveFixture(fixtureId) {
+  try {
+    const { sawAny, result } = await txline.getFinishedResultFromSnapshot(fixtureId);
+    if (result) return { res: result, health: 'ok' };
+    // Events but no game_finalised = genuinely still in progress. Authoritative:
+    // the snapshot has no window, so there is nothing for the fallback to add.
+    if (sawAny) return { res: null, health: 'ok' };
+  } catch (e) {
+    const denied = /HTTP 40[13]\b/.test(e.message || '');
+    try {
+      return { res: await txline.getFinishedResult(fixtureId), health: 'ok' };
+    } catch {
+      return { res: null, health: denied ? 'denied' : 'error', err: e };
+    }
+  }
+  // Snapshot returned zero events — fall back before giving up on this tick.
+  try {
+    const res = await txline.getFinishedResult(fixtureId);
+    return { res, health: res ? 'ok' : 'empty' };
+  } catch (e) {
+    return { res: null, health: 'error', err: e };
+  }
+}
+
+// --- pollLive tick health --------------------------------------------------
+// ONE fixture failing is routine (transient 5xx, a fixture TxLINE doesn't
+// cover) and stays a per-fixture warn. EVERY fixture in a tick failing the SAME
+// way is an outage: an expired/revoked API token (403) or an endpoint that
+// stopped returning data (empty). That case used to be invisible — each failure
+// was warn'd individually and pollLive simply left every fixture at 'live', so
+// a total loss of TxLINE access looked exactly like healthy-but-slow polling.
+// That is precisely what made the six-hour stall take so long to spot.
+let tickFailStreak = 0;
+let tickFailKind = null;
+
+function reportTickHealth(total, counts) {
+  // 403 is never normal, so escalate it even for a single candidate. 'empty'
+  // can legitimately describe one fixture that has only just kicked off, so
+  // require at least two before calling it an outage.
+  let kind = null;
+  if (counts.denied === total) kind = 'denied';
+  else if (counts.empty === total && total >= 2) kind = 'empty';
+
+  if (!kind) {
+    if (tickFailStreak) {
+      log.info(`pollLive: recovered — ${total} fixture(s) responding again after ${tickFailStreak} failed tick(s)`);
+    }
+    tickFailStreak = 0;
+    tickFailKind = null;
+    return;
+  }
+
+  if (kind !== tickFailKind) { tickFailStreak = 0; tickFailKind = kind; }
+  tickFailStreak++;
+
+  // Loud immediately, then every ~5 min, so an outage is impossible to miss
+  // without drowning the log at one message per pollLiveMs.
+  const every = Math.max(1, Math.round(300_000 / config.pollLiveMs));
+  if (tickFailStreak === 1 || tickFailStreak % every === 0) {
+    log.error(
+      kind === 'denied'
+        ? `pollLive: TxLINE ACCESS LOST — all ${total} fixture(s) returned HTTP 401/403 for ${tickFailStreak} consecutive tick(s). ` +
+          'Expired/revoked TXLINE_API_TOKEN or lost entitlement. NO fixture can be resolved; all are stuck at \'live\'.'
+        : `pollLive: TxLINE RETURNING NO DATA — all ${total} fixture(s) produced zero score events for ${tickFailStreak} consecutive tick(s). ` +
+          'Endpoint reachable but empty. NO fixture can be resolved; all are stuck at \'live\'.',
+    );
+  }
+}
+
 async function pollLive() {
   try {
     const now = Date.now();
@@ -105,9 +189,17 @@ async function pollLive() {
     if (selErr) throw selErr;
     if (!candidates || !candidates.length) return;
 
+    const counts = { ok: 0, empty: 0, denied: 0, error: 0 };
     for (const row of candidates) {
       try {
-        const res = await txline.getFinishedResult(row.fixture_id);
+        const { res, health, err } = await resolveFixture(row.fixture_id);
+        counts[health]++;
+        if (health === 'denied' || health === 'error') {
+          // Still a per-fixture warn — reportTickHealth escalates only if EVERY
+          // fixture in this tick failed the same way.
+          log.warn(`pollLive: fixture ${row.fixture_id} check failed: ${(err && err.message) || health}`);
+          continue;
+        }
         if (res) {
           const p1Home = row.participant1_is_home;
           const p1 = p1Home ? res.homeGoals : res.awayGoals;
@@ -133,12 +225,14 @@ async function pollLive() {
           log.info(`pollLive: fixture ${row.fixture_id} now live`);
         }
       } catch (e) {
-        // One fixture's TxLINE call failing (timeout, transient 5xx) must
-        // never stop the others in this batch — log and move on, next tick
-        // retries automatically.
+        // One fixture's Supabase write failing must never stop the others in
+        // this batch — log and move on, next tick retries automatically.
+        // (TxLINE failures are classified in resolveFixture and handled above,
+        // so this fixture already has a health count — don't count it twice.)
         log.warn(`pollLive: fixture ${row.fixture_id} check failed: ${e.message || e}`);
       }
     }
+    reportTickHealth(candidates.length, counts);
   } catch (e) {
     log.error(`pollLive failed: ${e.message || e}`);
   }
@@ -321,4 +415,11 @@ async function main() {
   setInterval(pollGoalWatch, config.pollGoalWatchMs);
 }
 
-main().catch((e) => { console.error('[poller] fatal:', e); process.exit(1); });
+// Only start the loops when run as the entry point (`node src/poller.cjs`, which
+// is what Railway does). Guarding this lets tests require the module to exercise
+// resolveFixture/reportTickHealth without spawning the daemon.
+if (require.main === module) {
+  main().catch((e) => { console.error('[poller] fatal:', e); process.exit(1); });
+}
+
+module.exports = { resolveFixture, reportTickHealth, pollLive };

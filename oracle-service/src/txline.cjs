@@ -82,8 +82,50 @@ function lastFinalFromText(text) {
   return { sawAny, fin };
 }
 
-// Final-whistle result for a fixture. Return semantics (callers rely on the
-// distinction between the two failure kinds):
+// Shared mapping from a finalised score event to our result shape, so the
+// historical and snapshot paths below can never drift apart.
+//   Stats["1"] = home goals, Stats["2"] = away goals,
+//   Stats["6001"]/["6002"] = penalty-shootout goals (knockout tiebreak).
+// Both endpoints carry participant metadata on the event, so a finished fixture
+// that has dropped off the forward snapshot is still fully resolvable.
+function mapFinalEvent(fixtureId, fin) {
+  const S = fin.Stats || {};
+  const n = (k) => Number(S[k] ?? 0);
+  return {
+    fixtureId,
+    seq: Number(fin.Seq),
+    action: fin.Action,
+    participant1Id: Number(fin.Participant1Id),
+    participant2Id: Number(fin.Participant2Id),
+    participant1IsHome: fin.Participant1IsHome === true,
+    homeGoals: n('1'),
+    awayGoals: n('2'),
+    homePens: n('6001'),
+    awayPens: n('6002'),
+    hasPens: S['6001'] !== undefined || S['6002'] !== undefined,
+  };
+}
+
+// Final-whistle result for a fixture, via /scores/historical.
+//
+// ⚠ FALLBACK ONLY — do NOT use this as the primary resolver. TxLINE's OpenAPI
+// spec (https://txline-dev.txodds.com/docs, docs.yaml) documents this endpoint
+// as serving a fixture only "provided its start time is between two weeks and
+// SIX HOURS in the past from current time". Outside that window it returns
+// HTTP 200 with a ZERO-BYTE body — not a 404 — which lands in the `!sawAny`
+// branch below and returns null, i.e. it is indistinguishable from "still in
+// progress". Measured 2026-07-21: fixtures resolved 0.7-18.7s after
+// (actual kickoff + 6h), keyed to TxLINE's StartTime (fixture 18257739 kicked
+// off 5 min late and its release slipped exactly 5 min with it). The two-week
+// end of the window is worse: a fixture not resolved inside it becomes
+// permanently unresolvable here and sits at 'live' forever.
+//
+// getFinishedResultFromSnapshot() below has no such window and is byte-identical
+// on every fixture where both work. Kept here because it is a genuinely useful
+// safety net: it reads a different backing store, so it can still answer when
+// the snapshot endpoint 403s or returns nothing.
+//
+// Return semantics (callers rely on the distinction between the two failure kinds):
 //   - returns an object  → the finalised result
 //   - returns null       → definitively no final result yet (404 / not started /
 //                          in progress). NOT an error — skip it.
@@ -105,25 +147,9 @@ async function getFinishedResult(fixtureId) {
       if (res.status === 404) return null; // definitively no data — don't retry/throw
       if (!res.ok) { log.warn(`scores/historical/${fixtureId} HTTP ${res.status}`); lastErr = new Error(`HTTP ${res.status}`); continue; }
       const { sawAny, fin } = lastFinalFromText(await res.text());
-      if (!sawAny) return null; // not started
+      if (!sawAny) return null; // not started — OR outside the window, see above
       if (!fin) return null; // in progress, not finalised
-      const S = fin.Stats || {};
-      const n = (k) => Number(S[k] ?? 0);
-      // The historical events carry participant metadata too, so a finished fixture
-      // that has dropped off the forward snapshot is still fully resolvable.
-      return {
-        fixtureId,
-        seq: Number(fin.Seq),
-        action: fin.Action,
-        participant1Id: Number(fin.Participant1Id),
-        participant2Id: Number(fin.Participant2Id),
-        participant1IsHome: fin.Participant1IsHome === true,
-        homeGoals: n('1'),
-        awayGoals: n('2'),
-        homePens: n('6001'),
-        awayPens: n('6002'),
-        hasPens: S['6001'] !== undefined || S['6002'] !== undefined,
-      };
+      return mapFinalEvent(fixtureId, fin);
     } catch (e) {
       lastErr = e; // AbortError (timeout) / network — retry once
     } finally {
@@ -179,6 +205,53 @@ function latestStatEvent(events) {
 }
 
 /**
+ * The finalised `game_finalised` event from a snapshot array, or null.
+ *
+ * MUST NOT reuse lastFinalFromText()'s "keep the last /final/i match" rule.
+ * That rule is correct for /scores/historical, which is a CHRONOLOGICAL replay
+ * where game_finalised necessarily comes after halftime_finalised. The snapshot
+ * is a different shape entirely: one event per Action type, NOT Seq-ordered. So
+ * halftime_finalised is a sibling entry here, not a superseded earlier one, and
+ * "last match in array order" picks it. Verified 2026-07-21 across 10 fixtures:
+ * the /final/i rule picked halftime_finalised on 10/10 — e.g. fixture 18257739
+ * would have been recorded 0-0 (a draw, winnerId 0) instead of its true 1-0.
+ *
+ * Hence: exact Action match, highest Seq wins (same max-Seq discipline as
+ * latestStatEvent, and for the same reason).
+ */
+function finalFromSnapshot(events) {
+  let fin = null;
+  for (const e of events) {
+    if (!e || e.Action !== 'game_finalised') continue;
+    const seq = Number(e.Seq);
+    if (!Number.isFinite(seq)) continue;
+    if (!fin || seq > Number(fin.Seq)) fin = e;
+  }
+  return fin;
+}
+
+/**
+ * Final-whistle result via /scores/snapshot — the PRIMARY resolver for pollLive.
+ * Unlike getFinishedResult it has no eligibility window, so a fixture is
+ * resolvable as soon as TxLINE publishes the final whistle rather than six
+ * hours after kickoff.
+ *
+ * Returns { sawAny, result } rather than a bare result, because pollLive needs
+ * to tell "TxLINE gave us nothing at all" apart from "the match is genuinely
+ * still in progress" in order to escalate a total outage:
+ *   sawAny — the fixture returned at least one event (we have access and the
+ *            fixture exists). false = 404 or an empty array.
+ *   result — the mapped game_finalised result, or null if not finalised yet.
+ * THROWS on 403 / non-404 HTTP / network, same as getScoresSnapshot.
+ */
+async function getFinishedResultFromSnapshot(fixtureId) {
+  const events = await getScoresSnapshot(fixtureId);
+  if (!events.length) return { sawAny: false, result: null };
+  const fin = finalFromSnapshot(events);
+  return { sawAny: true, result: fin ? mapFinalEvent(fixtureId, fin) : null };
+}
+
+/**
  * Merkle proof payload for `statKeys` at a given fixture+seq. Returns the RAW
  * API response — map it with statvalidation.cjs buildStatValidationInput()
  * before encoding (the API's field names are not 1:1 with the on-chain struct).
@@ -203,6 +276,6 @@ async function getStatValidation(fixtureId, seq, statKeys) {
 // `headers` and `timedFetch` are exported so callers can reuse this module's
 // auth + timeout discipline rather than duplicating either.
 module.exports = {
-  getFixtures, getFinishedResult, headers, timedFetch,
-  getScoresSnapshot, latestStatEvent, getStatValidation,
+  getFixtures, getFinishedResult, getFinishedResultFromSnapshot, headers, timedFetch,
+  getScoresSnapshot, latestStatEvent, finalFromSnapshot, getStatValidation,
 };
