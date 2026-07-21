@@ -33,7 +33,14 @@ const { config } = require('./config.cjs');
 const log = require('./logger.cjs');
 const txline = require('./txline.cjs');
 const goalwatch = require('./goalwatch.cjs');
+const winwatch = require('./winwatch.cjs');
 const statvalidation = require('./statvalidation.cjs');
+
+/// The `period` a proven stat carries at full time. Mirrors FULL_TIME_PERIOD in
+/// programs/pocket_fans/src/constants.rs — the on-chain pin that makes the
+/// TeamWinVerified trigger sound. Checked keeper-side too so a wrong-period
+/// proof is dropped before it costs a transaction fee.
+const FULL_TIME_PERIOD = 100;
 
 if (!config.supabaseUrl || !config.supabaseServiceRoleKey) {
   console.error('[poller] SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required. Set them in oracle-service/.env.');
@@ -392,6 +399,173 @@ async function pollGoalWatch() {
   }
 }
 
+// ===========================================================================
+// Loop 4: pollWinSettle — TeamWinVerified trigger (permissionless keeper).
+//
+// Hangs off the SAME finality pollLive already detects: it only looks at
+// fixtures already 'finished' in fixtures_cache that also have an open
+// TeamWinVerified rule on-chain. A live match costs this loop nothing.
+//
+// Cost per pass for a fixture with open rules: ONE /scores/snapshot (to find the
+// game_finalised seq) plus ONE /scores/stat-validation per distinct key order.
+// There are only two possible key orders — [home,away] and [away,home] — so
+// backers of both sides in the same match cost two proofs, not one per rule.
+// ===========================================================================
+
+/**
+ * Settle every eligible win rule on one finished fixture.
+ *
+ * The proof MUST be taken at the `game_finalised` seq: the on-chain full-time
+ * pin (period == 100) rejects anything else, and rightly so — a mid-match proof
+ * can show a scoreline that never became final.
+ */
+async function settleWinsForFixture(fixtureId, rules) {
+  const events = await txline.getScoresSnapshot(fixtureId);
+  const fin = txline.finalFromSnapshot(events);
+  if (!fin) {
+    log.warn(`pollWinSettle: fixture ${fixtureId} has no game_finalised event yet — skipping`);
+    return;
+  }
+  const seq = Number(fin.Seq);
+  if (!Number.isFinite(seq) || seq <= 0) {
+    log.warn(`pollWinSettle: fixture ${fixtureId} game_finalised has no usable Seq — skipping`);
+    return;
+  }
+
+  // Group by the rule's PINNED key order. The order is not cosmetic: it is what
+  // encodes home/away direction, and the program pins stats[0]/stats[1] to it.
+  // /scores/stat-validation returns stats in the order requested (verified
+  // against the live API 2026-07-21), which is what makes this grouping sound.
+  const byOrder = new Map();
+  for (const r of rules) {
+    const k = `${r.teamStatKey},${r.opponentStatKey}`;
+    if (!byOrder.has(k)) byOrder.set(k, []);
+    byOrder.get(k).push(r);
+  }
+
+  for (const [order, group] of byOrder) {
+    const keys = order.split(',').map(Number);
+    let payload;
+    try {
+      const sv = await txline.getStatValidation(fixtureId, seq, keys);
+      if (!sv) {
+        log.info(`pollWinSettle: no proof leaf yet for fixture ${fixtureId} seq ${seq} keys ${order} — retrying next tick`);
+        continue;
+      }
+      payload = statvalidation.buildStatValidationInput(sv);
+    } catch (e) {
+      log.warn(`pollWinSettle: fixture ${fixtureId} keys ${order} proof fetch failed: ${e.message || e}`);
+      continue;
+    }
+
+    // Verify the proof is the shape the program demands BEFORE spending a fee.
+    if (payload.stats.length !== 2
+        || payload.stats[0].stat.key !== keys[0]
+        || payload.stats[1].stat.key !== keys[1]) {
+      log.warn(`pollWinSettle: fixture ${fixtureId} proof stat order/shape wrong for keys ${order} — skipping`);
+      continue;
+    }
+    if (!payload.stats.every((s) => s.stat.period === FULL_TIME_PERIOD)) {
+      log.warn(
+        `pollWinSettle: fixture ${fixtureId} seq ${seq} proof is period ` +
+          `${payload.stats.map((s) => s.stat.period).join('/')}, not full time (${FULL_TIME_PERIOD}) — skipping`,
+      );
+      continue;
+    }
+    if (!(payload.stats[0].stat.value > payload.stats[1].stat.value)) {
+      log.info(
+        `pollWinSettle: fixture ${fixtureId} proven ${payload.stats[0].stat.value}-${payload.stats[1].stat.value} ` +
+          `for keys ${order} — not a win, nothing to settle`,
+      );
+      continue;
+    }
+
+    for (const rule of group) {
+      try {
+        // Re-read on-chain: another keeper (or the owner) may have settled it
+        // since getOpenWinRules ran. A cheap read beats a doomed transaction.
+        const fresh = await goalwatch.getRuleIfClaimable(connection, rule.rulePda);
+        if (!fresh) {
+          log.info(`pollWinSettle: rule ${rule.rulePda} no longer claimable — skipping`);
+          continue;
+        }
+        const owner = await goalwatch.getVaultOwner(connection, rule.vault);
+        if (!owner) {
+          log.warn(`pollWinSettle: vault ${rule.vault} not found for rule ${rule.rulePda} — skipping`);
+          continue;
+        }
+
+        const { ta0, ta1, ta2, whirlpoolOracle } = await statvalidation.ticksForBToA(connection);
+        const args = {
+          caller: keeper.publicKey,
+          vaultOwner: new PublicKey(owner),
+          ruleId: rule.ruleId,
+          payload,
+          ta0, ta1, ta2, whirlpoolOracle,
+        };
+        const ix = rule.isStaked
+          ? statvalidation.ixExecuteRuleStakedVerifiedWin(args)
+          : statvalidation.ixExecuteRuleVerifiedWin(args);
+
+        // v0 + ALT, mandatory. The staked variant does not merely exceed the
+        // packet limit as a legacy tx — it throws at CONSTRUCTION.
+        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+        const { vtx, size } = await statvalidation.buildExecuteRuleVerifiedTx({
+          connection, keeper, ix, blockhash,
+        });
+
+        const sig = await connection.sendTransaction(vtx, {
+          skipPreflight: false, // let a bad proof fail in simulation, before it costs a fee
+          preflightCommitment: 'confirmed',
+        });
+        await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed');
+        log.info(
+          `pollWinSettle: SETTLED rule ${rule.rulePda} (${rule.actionKind}, fixture ${fixtureId}, ` +
+            `full-time ${payload.stats[0].stat.value}-${payload.stats[1].stat.value} on keys ${order}, ` +
+            `seq ${seq}, v0 tx ${size}B) sig ${sig}`,
+        );
+      } catch (e) {
+        // Isolate per rule: one failure must not stop the others on this
+        // fixture. Next tick retries — the rule stays open until it settles.
+        log.warn(`pollWinSettle: rule ${rule.rulePda} failed: ${e.message || e}`);
+      }
+    }
+  }
+}
+
+async function pollWinSettle() {
+  try {
+    const { data: finished, error } = await supabase
+      .from('fixtures_cache')
+      .select('fixture_id, participant1_id, participant2_id, score')
+      .eq('status', 'finished');
+    if (error) throw error;
+    if (!finished || !finished.length) return;
+
+    const openRules = await winwatch.getOpenWinRules(connection, config.programId);
+    if (!openRules.size) return; // nothing on-chain is waiting — skip entirely
+
+    for (const row of finished) {
+      const rules = openRules.get(Number(row.fixture_id));
+      if (!rules || !rules.length) continue;
+
+      // Pre-filter on the CACHED full-time goals, not on winnerId: a match level
+      // after extra time and decided on penalties has a winnerId but is a draw
+      // by the full-time stat keys, so it can never settle (documented v1 scope).
+      const eligible = rules.filter((r) => winwatch.isFullTimeWinner(r, row));
+      if (!eligible.length) continue;
+
+      try {
+        await settleWinsForFixture(Number(row.fixture_id), eligible);
+      } catch (e) {
+        log.warn(`pollWinSettle: fixture ${row.fixture_id} settle failed: ${e.message || e}`);
+      }
+    }
+  } catch (e) {
+    log.error(`pollWinSettle failed: ${e.message || e}`);
+  }
+}
+
 async function main() {
   log.info(`poller starting — forward every ${config.pollForwardMs}ms, live every ${config.pollLiveMs}ms`);
   await refreshForward();
@@ -399,20 +573,38 @@ async function main() {
   setInterval(refreshForward, config.pollForwardMs);
   setInterval(pollLive, config.pollLiveMs);
 
-  if (!config.goalWatchEnabled) {
+  if (!config.goalWatchEnabled && !config.winWatchEnabled) {
     log.info('pollGoalWatch: DISABLED (set GOAL_WATCH_ENABLED=true to enable once the keeper is funded and TxLINE stat-validation access is confirmed)');
+    log.info('pollWinSettle: DISABLED (set WIN_WATCH_ENABLED=true to auto-settle TeamWinVerified rules)');
     return;
   }
 
   // Fail fast and loudly at startup rather than per-tick: an unfunded keeper
   // would otherwise surface as a confusing stream of tx-send failures.
   // Prefers KEEPER_SECRET_KEY (Railway) over KEEPER_KEYPAIR_PATH (local dev).
+  // ONE keeper identity, shared by both keeper loops. Loaded once, and only
+  // when at least one of them is enabled — the TeamWin/self-claim path never
+  // loads a signer.
   keeper = goalwatch.loadKeeper(config);
+  winwatch.init({ PublicKey });
   const bal = await goalwatch.assertKeeperFunded(connection, keeper);
-  log.info(`pollGoalWatch: ENABLED — keeper ${keeper.publicKey.toBase58()} (${bal / 1e9} SOL), every ${config.pollGoalWatchMs}ms`);
+  log.info(`keeper ${keeper.publicKey.toBase58()} funded with ${bal / 1e9} SOL`);
 
-  await pollGoalWatch();
-  setInterval(pollGoalWatch, config.pollGoalWatchMs);
+  if (config.goalWatchEnabled) {
+    log.info(`pollGoalWatch: ENABLED — every ${config.pollGoalWatchMs}ms`);
+    await pollGoalWatch();
+    setInterval(pollGoalWatch, config.pollGoalWatchMs);
+  } else {
+    log.info('pollGoalWatch: DISABLED (set GOAL_WATCH_ENABLED=true)');
+  }
+
+  if (config.winWatchEnabled) {
+    log.info(`pollWinSettle: ENABLED — every ${config.pollWinSettleMs}ms`);
+    await pollWinSettle();
+    setInterval(pollWinSettle, config.pollWinSettleMs);
+  } else {
+    log.info('pollWinSettle: DISABLED (set WIN_WATCH_ENABLED=true)');
+  }
 }
 
 // Only start the loops when run as the entry point (`node src/poller.cjs`, which
@@ -422,4 +614,4 @@ if (require.main === module) {
   main().catch((e) => { console.error('[poller] fatal:', e); process.exit(1); });
 }
 
-module.exports = { resolveFixture, reportTickHealth, pollLive };
+module.exports = { resolveFixture, reportTickHealth, pollLive, pollWinSettle, settleWinsForFixture };

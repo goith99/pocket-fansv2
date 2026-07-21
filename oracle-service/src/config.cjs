@@ -90,6 +90,18 @@ const config = {
   // access for our token. The loop is not even scheduled while this is false.
   goalWatchEnabled: process.env.GOAL_WATCH_ENABLED === 'true',
 
+  // MASTER SWITCH for the TeamWinVerified settle loop (winwatch). Separate from
+  // goalWatchEnabled on purpose: they are different risk profiles. GoalScored
+  // fires mid-match on a 15s loop; this fires ONCE per fixture at full time, off
+  // the finality the poller already detects, so it can be turned on
+  // independently. Shares the SAME keeper identity and the same unprivileged
+  // trust model (the Txoracle verdict is the only gate).
+  winWatchEnabled: process.env.WIN_WATCH_ENABLED === 'true',
+  // How often to look for finished fixtures with open win rules. Finality is
+  // already detected by pollLive every pollLiveMs; this only reacts to it, and
+  // each pass is one Supabase read plus one gPA, so it does not need to be fast.
+  pollWinSettleMs: num('POLL_WIN_SETTLE_MS', 60_000),
+
   // --- poller intervals (ms) ---
   // How often to re-pull the forward fixture list (catches newly announced
   // fixtures / schedule changes). Cheap call, no need to run it often.
@@ -125,7 +137,7 @@ const config = {
 // the loop intermittently seeing zero open rules — a silent no-op, not an error.
 // Better to refuse to start.
 // ---------------------------------------------------------------------------
-if (config.goalWatchEnabled) {
+if (config.goalWatchEnabled || config.winWatchEnabled) {
   const missing = [];
   if (!config.rpcExplicitlyConfigured) {
     missing.push(
