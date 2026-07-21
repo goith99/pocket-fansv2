@@ -14,6 +14,9 @@ const mono = JetBrains_Mono({ variable: "--font-mono", subsets: ["latin"], weigh
 export const metadata: Metadata = {
   title: "Pocket Fans — Back your team. Save when they win.",
   description: "Automated match-day savings for football fans.",
+  other: {
+    "ory-verify": "orynth-708a58c31b72447296fcae3b92100873",
+  },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
