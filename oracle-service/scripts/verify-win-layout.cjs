@@ -5,7 +5,7 @@ const fs = require('fs');
 const { PublicKey } = require('@solana/web3.js');
 const ww = require('../src/winwatch.cjs');
 ww.init({ PublicKey });
-const T = `${__dirname}/../../target/`;
+const T = `${__dirname}/../../programs/pocket_fans/tests/fixtures/`;
 
 let fail = 0;
 const ok = (n, c, extra = '') => { c ? console.log(`  PASS ${n}`) : (fail++, console.log(`  FAIL ${n} ${extra}`)); };

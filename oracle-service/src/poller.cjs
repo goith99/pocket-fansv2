@@ -419,7 +419,15 @@ async function pollGoalWatch() {
  * pin (period == 100) rejects anything else, and rightly so — a mid-match proof
  * can show a scoreline that never became final.
  */
-async function settleWinsForFixture(fixtureId, rules) {
+async function settleWinsForFixture(fixtureId, rules, deps = {}) {
+  // `deps` exists ONLY so tests can drive this function with a stub connection /
+  // signer and exercise the real candidate -> claimable -> build wiring. It was
+  // the absence of exactly that coverage that let the goalwatch/winwatch decoder
+  // mix-up reach production. Defaults are the module globals; production never
+  // passes anything.
+  const conn = deps.connection || connection;
+  const signer = deps.keeper || keeper;
+
   const events = await txline.getScoresSnapshot(fixtureId);
   const fin = txline.finalFromSnapshot(events);
   if (!fin) {
@@ -484,20 +492,26 @@ async function settleWinsForFixture(fixtureId, rules) {
       try {
         // Re-read on-chain: another keeper (or the owner) may have settled it
         // since getOpenWinRules ran. A cheap read beats a doomed transaction.
-        const fresh = await goalwatch.getRuleIfClaimable(connection, rule.rulePda);
+        //
+        // MUST be winwatch's, not goalwatch's. goalwatch.getRuleIfClaimable
+        // decodes with the GoalScored layout (trigger tag 1) and returns null
+        // for every TeamWinVerified rule (tag 2) — using it here meant the
+        // keeper logged "no longer claimable" forever and never settled
+        // anything. See the note on winwatch.getRuleIfClaimable.
+        const fresh = await winwatch.getRuleIfClaimable(conn, rule.rulePda);
         if (!fresh) {
           log.info(`pollWinSettle: rule ${rule.rulePda} no longer claimable — skipping`);
           continue;
         }
-        const owner = await goalwatch.getVaultOwner(connection, rule.vault);
+        const owner = await goalwatch.getVaultOwner(conn, rule.vault);
         if (!owner) {
           log.warn(`pollWinSettle: vault ${rule.vault} not found for rule ${rule.rulePda} — skipping`);
           continue;
         }
 
-        const { ta0, ta1, ta2, whirlpoolOracle } = await statvalidation.ticksForBToA(connection);
+        const { ta0, ta1, ta2, whirlpoolOracle } = await statvalidation.ticksForBToA(conn);
         const args = {
-          caller: keeper.publicKey,
+          caller: signer.publicKey,
           vaultOwner: new PublicKey(owner),
           ruleId: rule.ruleId,
           payload,
@@ -509,16 +523,16 @@ async function settleWinsForFixture(fixtureId, rules) {
 
         // v0 + ALT, mandatory. The staked variant does not merely exceed the
         // packet limit as a legacy tx — it throws at CONSTRUCTION.
-        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+        const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash();
         const { vtx, size } = await statvalidation.buildExecuteRuleVerifiedTx({
-          connection, keeper, ix, blockhash,
+          connection: conn, keeper: signer, ix, blockhash,
         });
 
-        const sig = await connection.sendTransaction(vtx, {
+        const sig = await conn.sendTransaction(vtx, {
           skipPreflight: false, // let a bad proof fail in simulation, before it costs a fee
           preflightCommitment: 'confirmed',
         });
-        await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed');
+        await conn.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed');
         log.info(
           `pollWinSettle: SETTLED rule ${rule.rulePda} (${rule.actionKind}, fixture ${fixtureId}, ` +
             `full-time ${payload.stats[0].stat.value}-${payload.stats[1].stat.value} on keys ${order}, ` +

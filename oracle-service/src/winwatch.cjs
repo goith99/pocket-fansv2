@@ -147,6 +147,31 @@ async function getOpenWinRules(connection, programId) {
 }
 
 /**
+ * Re-read ONE rule and return it only if it is still settleable.
+ *
+ * The TeamWinVerified counterpart of goalwatch.getRuleIfClaimable — and it must
+ * be a separate function, not a shared one. That helper decodes with
+ * decodeGoalScoredRule, whose first guard is `trigger tag === 1`; handed a
+ * TeamWinVerified rule (tag 2) it returns null unconditionally.
+ *
+ * THAT WAS A REAL PRODUCTION BUG: pollWinSettle called goalwatch's version, so
+ * every eligible win rule was logged "no longer claimable — skipping" on every
+ * tick, forever, and the keeper could never settle one. Observed on rule
+ * FNDApw6VtqA7Uvuh3juXV1ws3YN2J5AJ5eY7nuhumBTa (2026-07-21). Decoding is shared
+ * with getOpenWinRules below via decodeTeamWinVerifiedRule — do not reimplement
+ * the layout here, and do not route this through goalwatch.
+ */
+async function getRuleIfClaimable(connection, rulePubkey) {
+  const key = new PublicKey(rulePubkey);
+  const info = await connection.getAccountInfo(key);
+  if (!info) return null;
+  const r = decodeTeamWinVerifiedRule(key, info.data);
+  if (!r) return null;
+  if (!r.isActive || r.executionsDone >= r.maxExecutions) return null;
+  return r;
+}
+
+/**
  * Would this rule's team be proven a winner by the FULL-TIME goal stats?
  *
  * Pre-filter only — the on-chain predicate is the real gate. Exists so the
@@ -173,6 +198,7 @@ function isFullTimeWinner(rule, row) {
 module.exports = {
   init,
   getOpenWinRules,
+  getRuleIfClaimable,
   decodeTeamWinVerifiedRule,
   isFullTimeWinner,
   RULE_DISC,
