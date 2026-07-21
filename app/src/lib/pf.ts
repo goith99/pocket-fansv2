@@ -39,11 +39,13 @@ const m = (pubkey: PublicKey, isSigner: boolean, isWritable: boolean): AccountMe
 
 // --- trigger encoding (TriggerType, a borsh-tagged enum) ---
 // Tags come from the variant ORDER in programs/pocket_fans/src/state.rs:
-//   0 = TeamWin { team_id }
-//   1 = GoalScored { team_id, stat_key, threshold }
+//   0 = TeamWin { team_id }                                        (5 bytes)
+//   1 = GoalScored { team_id, stat_key, threshold }                (10 bytes)
+//   2 = TeamWinVerified { team_id, team_stat_key, opponent_stat_key } (13 bytes)
 export type RuleTrigger =
   | { kind: "TeamWin"; teamId: number }
-  | { kind: "GoalScored"; teamId: number; statKey: number; threshold: number };
+  | { kind: "GoalScored"; teamId: number; statKey: number; threshold: number }
+  | { kind: "TeamWinVerified"; teamId: number; teamStatKey: number; opponentStatKey: number };
 
 export function encodeTrigger(t: RuleTrigger): Buffer {
   switch (t.kind) {
@@ -51,7 +53,69 @@ export function encodeTrigger(t: RuleTrigger): Buffer {
       return Buffer.concat([u8(0), u32(t.teamId)]);
     case "GoalScored":
       return Buffer.concat([u8(1), u32(t.teamId), u32(t.statKey), u8(t.threshold)]);
+    // Direction (home vs away) is carried by WHICH key goes in WHICH slot, so
+    // the on-chain predicate is always `teamStatKey - opponentStatKey > 0`.
+    // Resolve the pair with statKeysForTeam() below — do not hand-pick them.
+    case "TeamWinVerified":
+      return Buffer.concat([u8(2), u32(t.teamId), u32(t.teamStatKey), u32(t.opponentStatKey)]);
   }
+}
+
+/**
+ * Full-time outcome of a fixture from a backed team's point of view — the state
+ * machine behind a TeamWinVerified card. Pure, so it can be tested directly
+ * (scripts/win-outcome-check.ts) rather than only inspected in the UI.
+ *
+ *   pending — not finished, or no scoreline yet: nothing decided
+ *   won     — team ahead on FULL-TIME goals; the keeper's settle window is open,
+ *             so the card must NOT show Expired
+ *   lost    — opponent ahead
+ *   drawn   — level at full time. Includes a PENALTY SHOOTOUT: the cached
+ *             winnerId is shootout-aware, but the on-chain predicate uses
+ *             full-time goal keys which exclude shootout goals, so such a rule
+ *             can never settle. Deliberately not "won" even when the backed team
+ *             lifted the trophy.
+ */
+export type FullTimeOutcome = "pending" | "won" | "lost" | "drawn";
+
+export function fullTimeOutcome(
+  fixture: {
+    status: "upcoming" | "live" | "finished";
+    participant1: { id: number }; participant2: { id: number };
+    score?: { p1: number; p2: number; winnerId: number } | null;
+  } | undefined | null,
+  teamId: number | null,
+): FullTimeOutcome {
+  if (!fixture || fixture.status !== "finished" || !fixture.score) return "pending";
+  const { p1, p2 } = fixture.score;
+  if (typeof p1 !== "number" || typeof p2 !== "number") return "pending";
+  if (p1 === p2) return "drawn";
+  const winnerTeamId = p1 > p2 ? fixture.participant1.id : fixture.participant2.id;
+  return teamId != null && winnerTeamId === teamId ? "won" : "lost";
+}
+
+/** TxLINE full-time goal stat keys: 1 = home goals, 2 = away goals. */
+export const STAT_KEY_HOME_GOALS = 1;
+export const STAT_KEY_AWAY_GOALS = 2;
+
+/**
+ * The pinned (team, opponent) stat-key pair for backing `teamId` in a fixture.
+ * The ONLY place home/away direction is decided — get this wrong and the rule
+ * silently settles on the opponent winning, so it is derived once here from the
+ * fixture's own participant/home flags rather than inferred at each call site.
+ */
+export function statKeysForTeam(
+  teamId: number,
+  fixture: { participant1: { id: number }; participant2: { id: number }; participant1IsHome: boolean },
+): { teamStatKey: number; opponentStatKey: number } {
+  const isP1 = teamId === fixture.participant1.id;
+  if (!isP1 && teamId !== fixture.participant2.id) {
+    throw new Error(`team ${teamId} does not play in this fixture`);
+  }
+  const teamIsHome = isP1 ? fixture.participant1IsHome : !fixture.participant1IsHome;
+  return teamIsHome
+    ? { teamStatKey: STAT_KEY_HOME_GOALS, opponentStatKey: STAT_KEY_AWAY_GOALS }
+    : { teamStatKey: STAT_KEY_AWAY_GOALS, opponentStatKey: STAT_KEY_HOME_GOALS };
 }
 
 // --- PDAs ---
@@ -387,6 +451,42 @@ const encBatchSummary = (s: ScoresBatchSummary) => Buffer.concat([
   bytes32(s.eventsSubTreeRoot),           // events_sub_tree_root: [u8; 32]
 ]);
 
+/**
+ * Map a RAW /api/scores/stat-validation response into StatValidationInput.
+ *
+ * Mirrors statvalidation.cjs buildStatValidationInput exactly — the API's field
+ * names are not 1:1 with the on-chain struct (`subTreeProof` -> fixture_proof,
+ * `summary.eventStatsSubTreeRoot` -> events_sub_tree_root). Exported so the
+ * manual-settle path and the parity harness share ONE mapping instead of each
+ * re-deriving it; scripts/encoder-parity.ts pins it against the keeper's copy.
+ */
+export function statValidationFromApi(sv: any): StatValidationInput {
+  const node = (n: any) => ({ hash: n.hash, isRightSibling: n.isRightSibling === true });
+  if (!Array.isArray(sv?.statsToProve) || !Array.isArray(sv?.statProofs)
+      || sv.statsToProve.length !== sv.statProofs.length) {
+    throw new Error("stat-validation: statsToProve/statProofs missing or length-mismatched");
+  }
+  return {
+    ts: BigInt(sv.ts),
+    fixtureSummary: {
+      fixtureId: BigInt(sv.summary.fixtureId),
+      updateStats: {
+        updateCount: Number(sv.summary.updateStats.updateCount),
+        minTimestamp: BigInt(sv.summary.updateStats.minTimestamp),
+        maxTimestamp: BigInt(sv.summary.updateStats.maxTimestamp),
+      },
+      eventsSubTreeRoot: sv.summary.eventStatsSubTreeRoot,
+    },
+    fixtureProof: (sv.subTreeProof || []).map(node),
+    mainTreeProof: (sv.mainTreeProof || []).map(node),
+    eventStatRoot: sv.eventStatRoot,
+    stats: sv.statsToProve.map((stat: any, i: number) => ({
+      stat: { key: Number(stat.key), value: Number(stat.value), period: Number(stat.period) },
+      statProof: sv.statProofs[i].map(node),
+    })),
+  };
+}
+
 export function encodeStatValidationInput(p: StatValidationInput): Buffer {
   return Buffer.concat([
     i64(p.ts),
@@ -464,20 +564,155 @@ export function ixExecuteRuleVerified(args: {
   });
 }
 
+/**
+ * execute_rule_verified_win — TeamWinVerified + SwapAndSave, settled DIRECTLY to
+ * the owner's wSOL ATA. 19 accounts, exact order of ExecuteRuleVerifiedWin.
+ *
+ * BROWSER-SIDE MANUAL FALLBACK. The keeper normally fires this (see
+ * oracle-service/src/poller.cjs); this exists so the owner can settle their own
+ * rule from the app if the keeper is down. The program does not care which of
+ * them calls — no signer identity is trusted, only the oracle verdict.
+ *
+ * MUST stay byte-identical to statvalidation.cjs ixExecuteRuleVerifiedWin;
+ * scripts/encoder-parity.ts asserts exactly that.
+ *
+ * `payload` must carry two stats in the rule's pinned order [team, opponent],
+ * both at the full-time seq (period 100).
+ */
+export function ixExecuteRuleVerifiedWin(args: {
+  caller: PublicKey;
+  vaultOwner: PublicKey;
+  ruleId: number;
+  payload: StatValidationInput;
+  tickArray0: PublicKey; tickArray1: PublicKey; tickArray2: PublicKey;
+  whirlpoolOracle: PublicKey;
+  dailyScoresRoots?: PublicKey;
+}): TransactionInstruction {
+  const vault = vaultPda(args.vaultOwner);
+  const rule = rulePda(vault, args.ruleId);
+  const dailyScoresRoots =
+    args.dailyScoresRoots ?? dailyScoresRootsPda(args.payload.fixtureSummary.updateStats.minTimestamp);
+
+  const data = Buffer.concat([
+    disc(DISC.execute_rule_verified_win),
+    u16(args.ruleId),
+    encodeStatValidationInput(args.payload),
+  ]);
+
+  return new TransactionInstruction({
+    programId: PROGRAM_ID,
+    keys: [
+      m(args.caller, true, true),                          //  0 caller
+      m(vault, false, false),                              //  1 vault
+      m(rule, false, true),                                //  2 rule
+      m(DEVUSDC_MINT, false, false),                       //  3 usdc_mint
+      m(WSOL_MINT, false, false),                          //  4 wsol_mint
+      m(ata(DEVUSDC_MINT, args.vaultOwner), false, true),  //  5 owner_usdc_ata
+      m(ata(DEVUSDC_MINT, vault), false, true),            //  6 vault_usdc_ata
+      m(ata(WSOL_MINT, args.vaultOwner), false, true),     //  7 owner_wsol_ata <- direct
+      m(WHIRLPOOL, false, true),                           //  8 whirlpool
+      m(WHIRLPOOL_VAULT_A, false, true),                   //  9 whirlpool_token_vault_a
+      m(WHIRLPOOL_VAULT_B, false, true),                   // 10 whirlpool_token_vault_b
+      m(args.tickArray0, false, true),                     // 11 tick_array_0
+      m(args.tickArray1, false, true),                     // 12 tick_array_1
+      m(args.tickArray2, false, true),                     // 13 tick_array_2
+      m(args.whirlpoolOracle, false, true),                // 14 whirlpool_oracle
+      m(WHIRLPOOL_PROGRAM, false, false),                  // 15 whirlpool_program
+      m(dailyScoresRoots, false, false),                   // 16 daily_scores_roots
+      m(TXORACLE_PROGRAM, false, false),                   // 17 txoracle_program
+      m(TOKEN_PROGRAM, false, false),                      // 18 token_program
+    ],
+    data,
+  });
+}
+
+/**
+ * execute_rule_staked_verified_win — TeamWinVerified + SwapStakeAndSave, mSOL
+ * settled DIRECTLY to the owner's mSOL ATA. 30 accounts.
+ *
+ * CANNOT be sent as a legacy transaction — it overflows the 1232-byte packet at
+ * CONSTRUCTION, not at send. Build it as v0 with the lookup table.
+ *
+ * PDA seeds use the VAULT OWNER, never the caller, so a keeper and the owner
+ * both derive the same stake_wsol / vault_sol addresses.
+ */
+export function ixExecuteRuleStakedVerifiedWin(args: {
+  caller: PublicKey;
+  vaultOwner: PublicKey;
+  ruleId: number;
+  payload: StatValidationInput;
+  tickArray0: PublicKey; tickArray1: PublicKey; tickArray2: PublicKey;
+  whirlpoolOracle: PublicKey;
+  dailyScoresRoots?: PublicKey;
+}): TransactionInstruction {
+  const vault = vaultPda(args.vaultOwner);
+  const rule = rulePda(vault, args.ruleId);
+  const dailyScoresRoots =
+    args.dailyScoresRoots ?? dailyScoresRootsPda(args.payload.fixtureSummary.updateStats.minTimestamp);
+
+  const data = Buffer.concat([
+    disc(DISC.execute_rule_staked_verified_win),
+    u16(args.ruleId),
+    encodeStatValidationInput(args.payload),
+  ]);
+
+  return new TransactionInstruction({
+    programId: PROGRAM_ID,
+    keys: [
+      m(args.caller, true, true),                              //  0 caller
+      m(vault, false, false),                                  //  1 vault
+      m(rule, false, true),                                    //  2 rule
+      m(DEVUSDC_MINT, false, false),                           //  3 usdc_mint
+      m(WSOL_MINT, false, false),                              //  4 wsol_mint
+      m(MSOL_MINT, false, true),                               //  5 msol_mint
+      m(ata(DEVUSDC_MINT, args.vaultOwner), false, true),      //  6 owner_usdc_ata
+      m(ata(DEVUSDC_MINT, vault), false, true),                //  7 vault_usdc_ata
+      m(stakeWsolPda(args.vaultOwner, args.ruleId), false, true), //  8 stake_wsol
+      m(vaultSolPda(args.vaultOwner), false, true),            //  9 vault_sol
+      m(ata(MSOL_MINT, args.vaultOwner), false, true),         // 10 owner_msol_ata <- direct
+      m(WHIRLPOOL, false, true),                               // 11 whirlpool
+      m(WHIRLPOOL_VAULT_A, false, true),                       // 12 whirlpool_token_vault_a
+      m(WHIRLPOOL_VAULT_B, false, true),                       // 13 whirlpool_token_vault_b
+      m(args.tickArray0, false, true),                         // 14 tick_array_0
+      m(args.tickArray1, false, true),                         // 15 tick_array_1
+      m(args.tickArray2, false, true),                         // 16 tick_array_2
+      m(args.whirlpoolOracle, false, true),                    // 17 whirlpool_oracle
+      m(WHIRLPOOL_PROGRAM, false, false),                      // 18 whirlpool_program
+      m(MARINADE_STATE, false, true),                          // 19 marinade_state
+      m(MARINADE_LIQ_POOL_SOL_LEG, false, true),               // 20 marinade_liq_pool_sol_leg
+      m(MARINADE_LIQ_POOL_MSOL_LEG, false, true),              // 21 marinade_liq_pool_msol_leg
+      m(MARINADE_LIQ_POOL_MSOL_LEG_AUTHORITY, false, false),   // 22 ..._authority
+      m(MARINADE_RESERVE, false, true),                        // 23 marinade_reserve
+      m(MARINADE_MSOL_MINT_AUTHORITY, false, false),           // 24 marinade_msol_mint_authority
+      m(MARINADE_PROGRAM, false, false),                       // 25 marinade_program
+      m(dailyScoresRoots, false, false),                       // 26 daily_scores_roots
+      m(TXORACLE_PROGRAM, false, false),                       // 27 txoracle_program
+      m(TOKEN_PROGRAM, false, false),                          // 28 token_program
+      m(SYSTEM_PROGRAM, false, false),                         // 29 system_program
+    ],
+    data,
+  });
+}
+
 // --- decoders / reads ---
 export interface RuleView {
   pubkey: string; vault: string; ruleId: number; teamId: number | null;
   amountUsdc: string | null; maxSlippageBps: number | null;
   matchId: string; matchEndTs: number;
   maxExecutions: number; executionsDone: number; isActive: boolean;
-  /** "TeamWin" (self-claim) or "GoalScored" (keeper + oracle). */
-  triggerKind: "TeamWin" | "GoalScored";
+  /** "TeamWin" (self-claim, time-guarded), "GoalScored" (keeper + oracle,
+   *  mid-match), or "TeamWinVerified" (keeper + oracle, once at full time —
+   *  settles itself, the owner never clicks claim). */
+  triggerKind: "TeamWin" | "GoalScored" | "TeamWinVerified";
   /** "SwapAndSave" (Auto DCA -> wSOL) or "SwapStakeAndSave" (Auto Stake -> mSOL,
    *  claimed via execute_rule_staked). Decides claim path AND the byte layout of
    *  every field after the action (SwapStakeAndSave has no target_mint). */
   actionKind: "SwapAndSave" | "SwapStakeAndSave";
   /** GoalScored only — the proven stat and the value it must reach. */
   statKey: number | null; threshold: number | null;
+  /** TeamWinVerified only — the pinned (team, opponent) full-time goal keys.
+   *  Their ORDER is what encodes home/away direction. */
+  teamStatKey: number | null; opponentStatKey: number | null;
 }
 
 // Layout — see programs/pocket_fans/src/state.rs Rule.
@@ -506,11 +741,13 @@ export function decodeRule(pubkey: PublicKey, data: Buffer): RuleView | null {
   if (data.length < 136 || !data.subarray(0, 8).equals(Buffer.from(ACCT_DISC.Rule))) return null;
 
   const triggerTag = data[42];
-  if (triggerTag !== 0 && triggerTag !== 1) return null; // unknown/newer trigger — don't misread it
+  if (triggerTag !== 0 && triggerTag !== 1 && triggerTag !== 2) return null; // unknown/newer trigger
   const isGoal = triggerTag === 1;
-  const triggerSize = isGoal ? 10 : 5;
+  const isWinVerified = triggerTag === 2;
+  // TeamWin 5 | GoalScored 10 | TeamWinVerified 13 (tag + team_id + two u32 keys)
+  const triggerSize = isGoal ? 10 : isWinVerified ? 13 : 5;
 
-  const actionTagOff = 42 + triggerSize; // 47 (TeamWin) or 52 (GoalScored)
+  const actionTagOff = 42 + triggerSize; // 47 | 52 | 55
   const actionTag = data[actionTagOff];
   if (actionTag !== 0 && actionTag !== 1) return null; // unknown/newer action — don't misread it
   const isStake = actionTag === 1;
@@ -527,11 +764,13 @@ export function decodeRule(pubkey: PublicKey, data: Buffer): RuleView | null {
     pubkey: pubkey.toBase58(),
     vault: new PublicKey(data.subarray(8, 40)).toBase58(),
     ruleId: data.readUInt16LE(40),
-    triggerKind: isGoal ? "GoalScored" : "TeamWin",
+    triggerKind: isGoal ? "GoalScored" : isWinVerified ? "TeamWinVerified" : "TeamWin",
     actionKind: isStake ? "SwapStakeAndSave" : "SwapAndSave",
-    teamId: data.readUInt32LE(43), // same offset in both triggers
+    teamId: data.readUInt32LE(43), // same offset in all three triggers
     statKey: isGoal ? data.readUInt32LE(47) : null,
     threshold: isGoal ? data[51] : null,
+    teamStatKey: isWinVerified ? data.readUInt32LE(47) : null,
+    opponentStatKey: isWinVerified ? data.readUInt32LE(51) : null,
     amountUsdc: data.readBigUInt64LE(amtOff).toString(), // present in both actions
     maxSlippageBps: data.readUInt16LE(slipOff),          // present in both actions
     matchId: data.readBigUInt64LE(midOff).toString(),

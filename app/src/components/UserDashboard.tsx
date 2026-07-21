@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { useFanApp } from "@/lib/useFanApp";
-import HomeView, { type SaveAction } from "./HomeView";
+import HomeView, { type SaveAction, type SettleMode } from "./HomeView";
 import TeamPickerSheet from "./TeamPickerSheet";
 import TransactionFlow from "./TransactionFlow";
 import LandingPage from "./LandingPage";
@@ -19,6 +19,8 @@ export default function UserDashboard() {
   const [teamId, setTeamId] = useState<number | "">("");
   const [amount, setAmount] = useState("1.00");
   const [saveAction, setSaveAction] = useState<SaveAction>("dca");
+  // Defaults to "auto" (TeamWinVerified): sign once, never tap again.
+  const [settleMode, setSettleMode] = useState<SettleMode>("auto");
   const [faucetSolAmount, setFaucetSolAmount] = useState("0.1");
   const [pickerOpen, setPickerOpen] = useState(false);
   const [celebrate, setCelebrate] = useState(false);
@@ -58,12 +60,19 @@ export default function UserDashboard() {
         onOpenPicker={() => setPickerOpen(true)}
         onCreate={() => {
           if (teamId === "") return;
-          if (saveAction === "stake") void app.createStakeChallenge(Number(teamId), amount);
+          // TeamWinVerified (auto) routes BOTH save actions through one builder;
+          // the staked flag picks the action variant, and with it the settlement
+          // ATA that must be pre-created. The manual path keeps the original
+          // self-claim TeamWin builders, untouched.
+          if (settleMode === "auto") void app.createWinChallenge(Number(teamId), amount, saveAction === "stake");
+          else if (saveAction === "stake") void app.createStakeChallenge(Number(teamId), amount);
           else void app.createChallenge(Number(teamId), amount);
         }}
         creating={app.busy}
         saveAction={saveAction}
         onSaveActionChange={setSaveAction}
+        settleMode={settleMode}
+        onSettleModeChange={setSettleMode}
         challenges={app.challenges}
         teamName={app.teamName}
         celebrate={celebrate}

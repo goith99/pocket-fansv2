@@ -1,7 +1,8 @@
-import { Goal, Info, PartyPopper, Coins } from "lucide-react";
+import { Goal, Info, PartyPopper, Coins, Zap, Hourglass } from "lucide-react";
 import TeamFlag from "./TeamFlag";
 import type { RuleView } from "@/lib/pf";
 import type { ChallengeNote } from "@/lib/useChallengeNotes";
+import type { WinOutcome } from "@/lib/useFanApp";
 
 const noteDate = (ms: number) => new Date(ms).toLocaleDateString([], { month: "short", day: "numeric" });
 
@@ -11,15 +12,20 @@ export default function ChallengeCard({
   note,
   onCancel,
   onClaim,
+  onSettle,
   busy,
   nowMs,
   matchFinished,
+  winOutcome,
 }: {
   challenge: RuleView;
   name: string;
   note?: ChallengeNote | null;
   onCancel?: () => void;
   onClaim?: () => void;
+  /** Manual fallback for a TeamWinVerified rule whose team has won but which the
+   *  keeper has not settled. Optional — omit it and the card just waits. */
+  onSettle?: () => void;
   busy?: boolean;
   /** Current time (ms). Passed in so the card doesn't need its own clock/timer;
    * the parent re-renders periodically and/or on demand. */
@@ -27,6 +33,11 @@ export default function ChallengeCard({
   /** True once the fixture this rule's match_id points at is finished. Only
    * meaningful for GoalScored rules (drives the "Expired" state). */
   matchFinished?: boolean;
+  /** Full-time outcome of the bound fixture from the BACKED team's side. Only
+   * meaningful for TeamWinVerified rules. A bare "finished" boolean cannot
+   * drive those states — a won match stays finished while the keeper is still
+   * settling, and that must not read as Expired. See winOutcomeFor(). */
+  winOutcome?: WinOutcome;
 }) {
   // Once executionsDone reaches maxExecutions, the delegation is fully spent —
   // there is nothing left to claim or to cancel. Older rules created before
@@ -46,7 +57,31 @@ export default function ChallengeCard({
   // has passed and there's still capacity left. No oracle/admin decides this —
   // it's a pure client-side time check mirroring the on-chain guard in
   // execute_rule.
-  const claimable = !isGoal && r.isActive && !exhausted && nowMs / 1000 >= r.matchEndTs;
+  // TeamWinVerified rules settle THEMSELVES through a keeper + Txoracle proof.
+  // Like GoalScored they are NOT self-claimable — the program rejects them from
+  // execute_rule with UnsupportedTrigger — so they must be excluded from the
+  // time-based claim flow below or the card would offer a button that reverts.
+  const isWinVerified = r.triggerKind === "TeamWinVerified";
+  const claimable = !isGoal && !isWinVerified && r.isActive && !exhausted && nowMs / 1000 >= r.matchEndTs;
+
+  // --- TeamWinVerified lifecycle -------------------------------------------
+  // Four distinct states, and the scoreline (not just "is the match over") is
+  // what separates them. `exhausted` already covers the settled case above via
+  // the "Completed" badge.
+  //
+  //   pending  — match not finished yet
+  //   awaiting — full time PROVES a win; the keeper's settle window is open.
+  //              This must NEVER render as Expired: the payout is coming, and
+  //              telling the user otherwise is worse than telling them nothing.
+  //   expired  — the team lost, OR the match was level at full time. The level
+  //              case includes a penalty shootout: full-time goal keys exclude
+  //              shootout goals, so such a rule can structurally never fire in
+  //              v1 no matter who lifted the trophy.
+  const winOpen = isWinVerified && r.isActive && !exhausted;
+  const winPending = winOpen && winOutcome === "pending";
+  const winAwaiting = winOpen && winOutcome === "won";
+  const winExpired = winOpen && (winOutcome === "lost" || winOutcome === "drawn");
+  const winDrawn = winOpen && winOutcome === "drawn";
   // A GoalScored rule is EXPIRED (dead) once the specific match it is bound to
   // is finished but it never executed: the keeper only watches live fixtures, so
   // it can never fire again. Bound to this rule's match_id, independent of
@@ -65,23 +100,30 @@ export default function ChallengeCard({
               ? `${name} scores ${r.threshold ?? 1}+ → save $${(Number(r.amountUsdc) / 1e6).toFixed(2)}`
               : `${name} wins → ${isStake ? "stake" : "save"} $${(Number(r.amountUsdc) / 1e6).toFixed(2)}`}
           </div>
-          {isStake && (
-            <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-green-tint px-2 py-0.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-green-deep">
-              <Coins size={11} /> Auto Stake · mSOL
-            </div>
-          )}
+          <div className="mt-1 flex flex-wrap items-center gap-1">
+            {isStake && (
+              <div className="inline-flex items-center gap-1 rounded-full bg-green-tint px-2 py-0.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-green-deep">
+                <Coins size={11} /> Auto Stake · mSOL
+              </div>
+            )}
+            {isWinVerified && (
+              <div className="inline-flex items-center gap-1 rounded-full bg-black/[0.05] px-2 py-0.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
+                <Zap size={11} /> Auto-settles
+              </div>
+            )}
+          </div>
           <div className="mt-0.5 flex items-center gap-2 text-[13px] text-muted">
             <span
               className={`inline-flex items-center gap-1 font-semibold ${
-                !goalExpired && (exhausted || r.isActive) ? "text-green" : "text-faint"
+                !goalExpired && !winExpired && (exhausted || r.isActive) ? "text-green" : "text-faint"
               }`}
             >
               <span
                 className={`h-1.5 w-1.5 rounded-full ${
-                  !goalExpired && (exhausted || r.isActive) ? "bg-green" : "bg-faint"
+                  !goalExpired && !winExpired && (exhausted || r.isActive) ? "bg-green" : "bg-faint"
                 }`}
               />
-              {exhausted ? "Completed" : goalExpired ? "Expired" : r.isActive ? "Active" : "Cancelled"}
+              {exhausted ? "Completed" : goalExpired || winExpired ? "Expired" : r.isActive ? "Active" : "Cancelled"}
             </span>
             <span>·</span>
             <span>saved {r.executionsDone}/{r.maxExecutions} times</span>
@@ -92,7 +134,12 @@ export default function ChallengeCard({
             <PartyPopper size={14} /> Start Saving
           </button>
         )}
-        {r.isActive && !claimable && !exhausted && onCancel && (
+        {winAwaiting && onSettle && (
+          <button className="btn-primary !min-h-[40px] shrink-0 px-3 text-sm" disabled={busy} onClick={onSettle}>
+            <PartyPopper size={14} /> Settle now
+          </button>
+        )}
+        {r.isActive && !claimable && !winAwaiting && !exhausted && onCancel && (
           <button className="btn-ghost !min-h-[40px] shrink-0 px-3 text-sm" disabled={busy} onClick={onCancel}>
             {!isGoal && note ? "End challenge" : "Cancel"}
           </button>
@@ -119,6 +166,48 @@ export default function ChallengeCard({
           <p>
             Match ended — {name} didn't reach {r.threshold ?? 1} goal{(r.threshold ?? 1) === 1 ? "" : "s"} for
             this challenge. No funds were affected; you can cancel this challenge.
+          </p>
+        </div>
+      )}
+
+      {/* TeamWinVerified PENDING: match not played/finished yet. Nothing for the
+          owner to do, ever — this is the whole point of the trigger. */}
+      {winPending && (
+        <div className="mt-3 flex items-start gap-2 rounded-xl bg-black/[0.03] px-3 py-2.5 text-[13px] leading-relaxed text-muted">
+          <Hourglass size={15} className="mt-0.5 shrink-0 text-faint" />
+          <p>
+            Waiting on {name}&rsquo;s result. If they win, this {isStake ? "stakes" : "saves"} automatically —
+            you won&rsquo;t need to tap anything.
+          </p>
+        </div>
+      )}
+
+      {/* TeamWinVerified WON, not yet settled. Deliberately NOT "Expired": the
+          full-time result already proves the win, and the keeper is submitting
+          the proof. Showing a dead state here would tell the user their money
+          isn't coming moments before it arrives. */}
+      {winAwaiting && (
+        <div className="mt-3 flex items-start gap-2 rounded-xl bg-green-tint px-3 py-2.5 text-[13px] leading-relaxed text-green-deep">
+          <PartyPopper size={15} className="mt-0.5 shrink-0" />
+          <p>
+            {name} won! Settling automatically — the {isStake ? "mSOL" : "SOL"} lands straight in your wallet.
+            {onSettle ? " Taking a while? You can settle it yourself with the button above." : " Nothing to tap."}
+          </p>
+        </div>
+      )}
+
+      {/* TeamWinVerified EXPIRED. Two causes, worth distinguishing in the copy:
+          a plain loss, or a match level at full time. The level case includes a
+          penalty shootout — full-time goal stats exclude shootout goals, so the
+          rule could never have fired regardless of who went through. Saying that
+          plainly beats leaving the user to wonder why a "win" didn't pay. */}
+      {winExpired && (
+        <div className="mt-3 flex items-start gap-2 rounded-xl bg-black/[0.03] px-3 py-2.5 text-[13px] leading-relaxed text-muted">
+          <Info size={15} className="mt-0.5 shrink-0 text-faint" />
+          <p>
+            {winDrawn
+              ? `That match was level at full time, so this challenge didn't trigger — draws and penalty shootouts don't count as a win here. No funds were affected; you can cancel this challenge.`
+              : `Match ended — ${name} didn't win, so nothing was saved. No funds were affected; you can cancel this challenge.`}
           </p>
         </div>
       )}

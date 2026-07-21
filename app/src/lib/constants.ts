@@ -34,6 +34,9 @@ export const DISC = {
   execute_rule_verified: [109, 158, 73, 235, 69, 145, 96, 155],
   execute_rule_staked: [230, 120, 146, 64, 213, 216, 43, 197],
   execute_rule_staked_direct: [135, 212, 228, 85, 247, 150, 62, 206],
+  // TeamWinVerified pair — keeper-settled, direct to the owner's wallet.
+  execute_rule_verified_win: [39, 23, 107, 54, 149, 187, 137, 248],
+  execute_rule_staked_verified_win: [129, 136, 80, 142, 182, 77, 143, 238],
 } as const;
 
 // --- Marinade liquid staking (DEVNET) — accounts forwarded to execute_rule_staked ---
@@ -115,3 +118,14 @@ export const DEFAULT_MAX_EXECUTIONS = 1;
 
 // Browser talks to the same-origin RPC proxy (keeps the Helius key server-side).
 export const BROWSER_RPC = "/api/rpc";
+
+// --- v0 + Address Lookup Table (manual settle / keeper parity) ---
+// The TeamWinVerified settle instructions carry a Merkle proof and up to 30
+// accounts. execute_rule_staked_verified_win does not merely exceed the 1232-byte
+// packet limit as a legacy transaction — it THROWS at construction. The table
+// below holds their static accounts; it was extended on 2026-07-21 to 23 entries
+// to cover the Marinade/mSOL/system set the staked variant needs.
+// Same table the keeper uses (oracle-service/src/statvalidation.cjs).
+export const LOOKUP_TABLE_ADDRESS = new PublicKey(
+  process.env.NEXT_PUBLIC_LOOKUP_TABLE_ADDRESS || "Dm3LvzUA7u9GeMDzD7TTrUKqbPFo7uYVzJMjbWRMy6pf",
+);

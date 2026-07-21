@@ -26,6 +26,7 @@ import {
 } from "@solana/web3.js";
 import {
   encodeStatValidationInput, dailyScoresRootsPda, StatValidationInput,
+  ixExecuteRuleVerifiedWin, ixExecuteRuleStakedVerifiedWin, statValidationFromApi,
 } from "../src/lib/pf";
 
 const require_ = createRequire(import.meta.url);
@@ -74,30 +75,27 @@ const FIXTURES = [
   },
 ];
 
-const node = (n: any) => ({ hash: n.hash, isRightSibling: n.isRightSibling === true });
+// ---------------------------------------------------------------------------
+// TeamWinVerified fixtures — TWO stats, not one.
+//
+// A win predicate proves the backed team's goals AND the opponent's, so the
+// payload carries two StatLeafs (each with its own Merkle branch) where
+// GoalScored carries one. That roughly doubles the stat portion, which is why
+// these get their own size assertions rather than riding on the fixtures above.
+//
+// This is a real captured full-time proof for World Cup fixture 18257739
+// (1-0 home, keys [1,2] at the game_finalised seq 1385, both period 100).
+// ---------------------------------------------------------------------------
+const WIN_FIXTURE = {
+  id: 18_257_739,
+  file: "stat_validation_18257739_fulltime.json",
+  note: "FULL-TIME, two-stat win proof — the TeamWinVerified case",
+};
 
-/** Encode via pf.ts, fed the same mapping statvalidation.cjs applies. */
-function toPfTs(sv: any): StatValidationInput {
-  return {
-    ts: BigInt(sv.ts),
-    fixtureSummary: {
-      fixtureId: BigInt(sv.summary.fixtureId),
-      updateStats: {
-        updateCount: Number(sv.summary.updateStats.updateCount),
-        minTimestamp: BigInt(sv.summary.updateStats.minTimestamp),
-        maxTimestamp: BigInt(sv.summary.updateStats.maxTimestamp),
-      },
-      eventsSubTreeRoot: sv.summary.eventStatsSubTreeRoot,
-    },
-    fixtureProof: (sv.subTreeProof || []).map(node),
-    mainTreeProof: (sv.mainTreeProof || []).map(node),
-    eventStatRoot: sv.eventStatRoot,
-    stats: sv.statsToProve.map((stat: any, i: number) => ({
-      stat: { key: Number(stat.key), value: Number(stat.value), period: Number(stat.period) },
-      statProof: sv.statProofs[i].map(node),
-    })),
-  };
-}
+/** Encode via pf.ts. Uses the SHARED exported mapper (statValidationFromApi),
+ * not a local copy — the manual-settle path in the browser uses that same
+ * function, so this pins the MAPPING as well as the encoding. */
+const toPfTs = (sv: any): StatValidationInput => statValidationFromApi(sv);
 
 /**
  * Build the real execute_rule_verified tx both ways and report sizes. Fully
@@ -217,5 +215,157 @@ for (const fx of FIXTURES) {
   fs.writeFileSync(path.join(outDir, `parity_cjs_${fx.id}.bin`), bytesCjs);
 }
 
+// ---------------------------------------------------------------------------
+// TeamWinVerified: compare the FULL INSTRUCTIONS, not just the payload.
+//
+// Everything above pins the shared payload encoder. That is necessary but NOT
+// sufficient: each side also builds its own account list, and an account order
+// or writable-flag mismatch between browser and keeper is invisible to a
+// payload-only comparison. It would surface as a runtime failure on one client
+// and not the other — the worst kind to debug. So here both sides build the
+// whole instruction and every byte and every account meta is compared.
+// ---------------------------------------------------------------------------
+{
+  const file = path.resolve(
+    __dirname, "../../programs/pocket_fans/tests/fixtures", WIN_FIXTURE.file,
+  );
+  const sv = JSON.parse(fs.readFileSync(file, "utf8"));
+  const payloadCjs = statvalidation.buildStatValidationInput(sv);
+  const payloadTs = toPfTs(sv);
+
+  console.log(`\n[${WIN_FIXTURE.id}] ${WIN_FIXTURE.note}`);
+
+  // The proof must actually be the two-stat, full-time shape this trigger needs,
+  // or the assertions below are measuring the wrong thing.
+  const stats = payloadCjs.stats;
+  if (stats.length !== 2) {
+    console.error(`  WRONG SHAPE: expected 2 stats, got ${stats.length}. This fixture must be a two-stat win proof.`);
+    failed = true;
+  } else if (!stats.every((s: any) => s.stat.period === 100)) {
+    console.error(
+      `  NOT FULL TIME: periods ${stats.map((s: any) => s.stat.period).join(",")} (expected 100,100). ` +
+        "The on-chain full-time pin would reject this, so it cannot stand in for a real win proof.",
+    );
+    failed = true;
+  } else {
+    console.log(`  stats          : ${stats.map((s: any) => `k${s.stat.key}=${s.stat.value}@p${s.stat.period}`).join(" ")}`);
+  }
+
+  const keeper = Keypair.generate();
+  const vaultOwner = Keypair.generate().publicKey;
+  const ta0 = Keypair.generate().publicKey;
+  const ta1 = Keypair.generate().publicKey;
+  const whirlpoolOracle = Keypair.generate().publicKey;
+  const ticks = { ta0, ta1, ta2: ta0, whirlpoolOracle };
+  const common = { caller: keeper.publicKey, vaultOwner, ruleId: 9 };
+
+  const PAIRS = [
+    {
+      name: "execute_rule_verified_win",
+      cjs: statvalidation.ixExecuteRuleVerifiedWin({ ...common, payload: payloadCjs, ...ticks }),
+      ts: ixExecuteRuleVerifiedWin({
+        ...common, payload: payloadTs,
+        tickArray0: ta0, tickArray1: ta1, tickArray2: ta0, whirlpoolOracle,
+      }),
+      expectAccounts: 19,
+    },
+    {
+      name: "execute_rule_staked_verified_win",
+      cjs: statvalidation.ixExecuteRuleStakedVerifiedWin({ ...common, payload: payloadCjs, ...ticks }),
+      ts: ixExecuteRuleStakedVerifiedWin({
+        ...common, payload: payloadTs,
+        tickArray0: ta0, tickArray1: ta1, tickArray2: ta0, whirlpoolOracle,
+      }),
+      expectAccounts: 30,
+    },
+  ];
+
+  const lut = new AddressLookupTableAccount({
+    key: statvalidation.LOOKUP_TABLE_ADDRESS as PublicKey,
+    state: {
+      deactivationSlot: 2n ** 64n - 1n,
+      lastExtendedSlot: 0,
+      lastExtendedSlotStartIndex: 0,
+      authority: keeper.publicKey,
+      addresses: statvalidation.altStaticAddresses(ticks),
+    },
+  });
+
+  for (const p of PAIRS) {
+    // --- instruction data, byte for byte (includes the discriminator) ---
+    if (!Buffer.from(p.ts.data).equals(Buffer.from(p.cjs.data))) {
+      console.error(
+        `  ${p.name}: INSTRUCTION DATA DRIFT — pf.ts ${p.ts.data.length} B vs ` +
+          `statvalidation.cjs ${p.cjs.data.length} B`,
+      );
+      failed = true;
+      continue;
+    }
+    // --- account list: address, order, signer AND writable ---
+    if (p.ts.keys.length !== p.cjs.keys.length) {
+      console.error(`  ${p.name}: ACCOUNT COUNT DRIFT — pf.ts ${p.ts.keys.length} vs cjs ${p.cjs.keys.length}`);
+      failed = true;
+      continue;
+    }
+    const drift: string[] = [];
+    p.ts.keys.forEach((k, i) => {
+      const o = p.cjs.keys[i];
+      if (!k.pubkey.equals(o.pubkey)) drift.push(`#${i} address ${k.pubkey.toBase58()} vs ${o.pubkey.toBase58()}`);
+      if (k.isSigner !== o.isSigner) drift.push(`#${i} isSigner ${k.isSigner} vs ${o.isSigner}`);
+      if (k.isWritable !== o.isWritable) drift.push(`#${i} isWritable ${k.isWritable} vs ${o.isWritable}`);
+    });
+    if (drift.length) {
+      console.error(`  ${p.name}: ACCOUNT META DRIFT — ${drift.join("; ")}`);
+      failed = true;
+      continue;
+    }
+    if (p.ts.keys.length !== p.expectAccounts) {
+      console.error(`  ${p.name}: expected ${p.expectAccounts} accounts, got ${p.ts.keys.length}`);
+      failed = true;
+      continue;
+    }
+
+    // --- and it has to fit ---
+    let legacyBytes: number | null = null;
+    try {
+      const legacy = new Transaction().add(statvalidation.ixComputeBudget()).add(p.cjs);
+      legacy.feePayer = keeper.publicKey;
+      legacy.recentBlockhash = "11111111111111111111111111111111";
+      legacyBytes = legacy.serializeMessage().length + 1 + 64;
+    } catch {
+      legacyBytes = null; // overflows at construction — see below
+    }
+    const msg = new TransactionMessage({
+      payerKey: keeper.publicKey,
+      recentBlockhash: "11111111111111111111111111111111",
+      instructions: [statvalidation.ixComputeBudget(), p.cjs],
+    }).compileToV0Message([lut]);
+    const v0 = new VersionedTransaction(msg);
+    v0.sign([keeper]);
+    const v0Bytes = v0.serialize().length;
+
+    console.log(
+      `  ${p.name}: encoders agree (${p.ts.data.length} B data, ${p.ts.keys.length} accounts) | ` +
+        `legacy ${legacyBytes === null ? "THROWS" : legacyBytes + " B"} | v0+ALT ${v0Bytes} B ` +
+        `(${PACKET_LIMIT - v0Bytes} B spare)`,
+    );
+
+    if (v0Bytes > PACKET_LIMIT) {
+      console.error(
+        `  ${p.name}: TX TOO LARGE — ${v0Bytes} B > ${PACKET_LIMIT} even as v0 + ALT. ` +
+          "Check that the lookup table contains every static account this instruction uses " +
+          "(the staked variant needs the 9 Marinade/mSOL/system entries added 2026-07-21).",
+      );
+      failed = true;
+    }
+  }
+
+  fs.writeFileSync(path.join(outDir, `parity_ts_${WIN_FIXTURE.id}.bin`), encodeStatValidationInput(payloadTs));
+  fs.writeFileSync(path.join(outDir, `parity_cjs_${WIN_FIXTURE.id}.bin`), statvalidation.encodeStatValidationInput(payloadCjs));
+}
+
 if (failed) process.exit(1);
-console.log(`\nencoder parity OK across ${FIXTURES.length} fixtures (pf.ts === statvalidation.cjs), all txs fit.`);
+console.log(
+  `\nencoder parity OK across ${FIXTURES.length + 1} fixtures (pf.ts === statvalidation.cjs), ` +
+    "including full-instruction parity for both TeamWinVerified instructions. All txs fit.",
+);

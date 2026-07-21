@@ -131,6 +131,8 @@ export default function MyChallengesPage() {
               busy={app.busy}
               nowMs={nowMs}
               matchFinished={app.isMatchFinished(r.matchId)}
+              winOutcome={app.winOutcomeFor(r.matchId, r.teamId)}
+              onSettle={() => void app.settleChallenge(r)}
             />
           ))}
           <Link href="/" className="btn-ghost mt-1 w-full"><Plus size={16} /> Create another challenge</Link>

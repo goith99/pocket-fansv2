@@ -20,6 +20,16 @@ const WHEN = [
   { label: "Yellow card", state: "soon" as const },
 ];
 export type SaveAction = "dca" | "stake";
+/**
+ * How the challenge settles once the team wins.
+ *   "auto"   -> TriggerType::TeamWinVerified. A permissionless keeper proves the
+ *               full-time result via the Txoracle CPI and the payout lands in
+ *               the user's wallet. They sign ONCE, at creation, and never again.
+ *   "manual" -> TriggerType::TeamWin. The original self-claim model: the owner
+ *               taps "Start Saving" after the match. Kept because it needs no
+ *               keeper to be running, so it always works.
+ */
+export type SettleMode = "auto" | "manual";
 
 function Chip({ label, state }: { label: string; state: "active" | "soon" }) {
   if (state === "soon") {
@@ -113,6 +123,7 @@ export default function HomeView({
   greetingName, balanceUsd, savedMsol, savedDcaSol, selectedTeam, amount, onAmountChange, onOpenPicker, onCreate, creating, challenges, teamName, celebrate, loadError, onRetry,
   solBalance, faucetSolAmount, onFaucetSolAmountChange, onGetDevUsdc, faucetBusy,
   saveAction, onSaveActionChange,
+  settleMode, onSettleModeChange,
 }: {
   greetingName: string;
   balanceUsd: number | null;
@@ -126,6 +137,8 @@ export default function HomeView({
   creating: boolean;
   saveAction: SaveAction;
   onSaveActionChange: (a: SaveAction) => void;
+  settleMode: SettleMode;
+  onSettleModeChange: (m: SettleMode) => void;
   challenges: RuleView[];
   teamName: (id: number) => string;
   celebrate: boolean;
@@ -216,6 +229,17 @@ export default function HomeView({
           {saveAction === "stake"
             ? "Your winnings are staked into SOL (mSOL) — earns staking yield while saved."
             : "Your winnings are swapped into SOL and paid straight into your wallet."}
+        </p>
+
+        <div className="label mb-2 mt-4">Settling</div>
+        <div className="grid grid-cols-2 gap-2">
+          <SelectableChip label="Automatic" selected={settleMode === "auto"} onClick={() => onSettleModeChange("auto")} />
+          <SelectableChip label="I&rsquo;ll tap it" selected={settleMode === "manual"} onClick={() => onSettleModeChange("manual")} />
+        </div>
+        <p className="mt-1.5 text-[13px] text-muted">
+          {settleMode === "auto"
+            ? "Saves itself the moment the result is final — you never tap anything again. Draws and penalty shootouts don\u2019t count as a win."
+            : "You tap \u201cStart Saving\u201d yourself once the match is over."}
         </p>
 
         <div className="mt-2.5 flex items-center gap-3">

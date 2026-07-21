@@ -12,16 +12,18 @@
 // passed. See programs/pocket_fans/src/instructions/execute_rule.rs.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePrivy, useSolanaWallets } from "@privy-io/react-auth";
-import { Connection, PublicKey, Transaction, TransactionInstruction, ComputeBudgetProgram } from "@solana/web3.js";
+import { Connection, PublicKey, Transaction, TransactionInstruction, ComputeBudgetProgram, TransactionMessage, VersionedTransaction } from "@solana/web3.js";
 import { createAssociatedTokenAccountIdempotentInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token";
 import {
   DEVUSDC_MINT, WSOL_MINT, MSOL_MINT, DEVUSDC_DECIMALS, DEFAULT_MAX_EXECUTIONS, DEFAULT_MAX_SLIPPAGE_BPS,
   MATCH_END_BUFFER_SECS, STAT_KEY_HOME_GOALS, STAT_KEY_AWAY_GOALS, GOALSCORED_CREATION_ENABLED,
+  LOOKUP_TABLE_ADDRESS, VERIFY_COMPUTE_UNITS,
 } from "@/lib/constants";
 import {
-  vaultPda, ata, ixInitializeVault, ixCreateRule, ixRevokeRule, ixWithdrawFromVault,
+  vaultPda, ata, ixInitializeVault, ixCreateRule, ixRevokeRule, ixWithdrawFromVault, statKeysForTeam,
   ixExecuteRuleDirect, ixExecuteRuleStakedDirect, ticksForBToA, getUserVault, getUserRules, tokenUiBalance, RuleView,
-  ixWrapSol, ixSyncNative, ixSwapSolToUsdc, ticksForAToB, estimateUsdcOut, estimateWsolOut,
+  ixWrapSol, ixSyncNative, ixSwapSolToUsdc, ticksForAToB, estimateUsdcOut, estimateWsolOut, fullTimeOutcome,
+  ixExecuteRuleVerifiedWin, ixExecuteRuleStakedVerifiedWin, statValidationFromApi,
 } from "@/lib/pf";
 import { TEAM_BY_ID } from "@/lib/flags";
 import { useTxFlow } from "@/components/TransactionFlow";
@@ -60,6 +62,13 @@ function isFixtureCreatable(f: Fixture, nowMs: number): boolean {
   if (f.status === "finished") return false;
   return f.startTime + MATCH_END_BUFFER_SECS * 1000 > nowMs;
 }
+
+/**
+ * Full-time outcome of a TeamWinVerified rule's bound fixture, from the backed
+ * team's point of view. "drawn" includes a match decided on penalties, which
+ * this trigger structurally cannot settle in v1.
+ */
+export type WinOutcome = "pending" | "won" | "lost" | "drawn";
 
 export function useFanApp() {
   const { ready, authenticated, login, logout, user } = usePrivy();
@@ -166,6 +175,35 @@ export function useFanApp() {
     // Explicit human action already occurred (button tap). Triggers the wallet
     // signing UI — no auto-approval anywhere.
     const signed = await (wallet as any).signTransaction(tx);
+    const sig = await connection.sendRawTransaction(signed.serialize());
+    onSent(sig);
+    await pollConfirm(sig);
+    return sig;
+  }
+
+  /**
+   * v0 + Address Lookup Table submit. Separate from submit() above, which builds
+   * a LEGACY transaction — that cannot carry the TeamWinVerified settle
+   * instructions at all. execute_rule_staked_verified_win has 30 accounts plus a
+   * Merkle proof and THROWS at construction as a legacy tx, so this is not an
+   * optimisation, it is the only way to send it.
+   *
+   * Deliberately throws rather than silently falling back to legacy: a fallback
+   * would just resurface as "Transaction too large" at an unhelpful moment.
+   */
+  async function submitV0(ixs: TransactionInstruction[], onSent: (sig: string) => void): Promise<string> {
+    if (!wallet) throw new Error("no wallet");
+    const owner = new PublicKey(wallet.address);
+    const { value: lut } = await connection.getAddressLookupTable(LOOKUP_TABLE_ADDRESS);
+    if (!lut) throw new Error("address lookup table not found — cannot build the settle transaction");
+    const msg = new TransactionMessage({
+      payerKey: owner,
+      recentBlockhash: (await connection.getLatestBlockhash()).blockhash,
+      instructions: [ComputeBudgetProgram.setComputeUnitLimit({ units: VERIFY_COMPUTE_UNITS }), ...ixs],
+    }).compileToV0Message([lut]);
+    const vtx = new VersionedTransaction(msg);
+    // Explicit human action already occurred (button tap). No auto-approval.
+    const signed = await (wallet as any).signTransaction(vtx);
     const sig = await connection.sendRawTransaction(signed.serialize());
     onSent(sig);
     await pollConfirm(sig);
@@ -285,6 +323,132 @@ export function useFanApp() {
   // on-chain predicate only ever checks stat_key, so it must match the side the
   // backed team actually plays on in THIS fixture. Getting it wrong would mean
   // proving the opponent's goals.
+  /**
+   * TeamWinVerified — the AUTO-SETTLED win challenge. The owner signs this once
+   * and never touches it again: a permissionless keeper proves the full-time
+   * result through the Txoracle CPI and the payout lands straight in their
+   * wallet (execute_rule_verified_win / execute_rule_staked_verified_win).
+   *
+   * ATA PRE-CREATION IS DIFFERENT FROM EVERY OTHER FLOW HERE — read before
+   * changing. These instructions settle DIRECTLY to the owner, so the accounts
+   * that must exist are:
+   *     owner USDC   — the delegated pull source
+   *     vault USDC   — the swap INPUT (still the vault's; unchanged)
+   *     owner wSOL / owner mSOL — the settlement DESTINATION
+   * NOT the vault's wSOL/mSOL ATA, which createChallenge/createGoalChallenge
+   * create and which this path never touches. Getting this wrong does not fail
+   * loudly at creation: the rule is created fine and then the keeper's
+   * transaction reverts forever on a missing account, because the keeper has no
+   * authority to open an ATA on someone else's behalf. So it must happen here,
+   * while the owner is signing.
+   */
+  const createWinChallenge = useCallback(async (teamId: number, amountStr: string, staked: boolean) => {
+    if (!address) return null;
+    const owner = new PublicKey(address);
+    const amountUsdc = BigInt(Math.round(Number(amountStr) * 10 ** DEVUSDC_DECIMALS));
+    const sig = await run(
+      staked ? "Setting up your auto staking challenge" : "Setting up your auto challenge",
+      async (onSent) => {
+        if (amountUsdc <= 0n) throw new Error("Enter an amount greater than 0");
+        const fixture = nextFixtureForTeam(teamId);
+        if (!fixture) throw new Error("No scheduled match found for this team yet");
+
+        // The ONLY place home/away direction is decided. The pair's ORDER is
+        // what the on-chain predicate uses (team - opponent > 0), so it is
+        // derived from the fixture rather than assumed.
+        const { teamStatKey, opponentStatKey } = statKeysForTeam(teamId, fixture);
+
+        const matchId = BigInt(fixture.fixtureId);
+        // Stored for consistency with the other paths. UNUSED by the verified
+        // win instructions: they gate on the proven full-time period, which is
+        // strictly better than a wall-clock buffer.
+        const matchEndTs = BigInt(Math.floor(fixture.startTime / 1000) + MATCH_END_BUFFER_SECS);
+
+        const ixs: TransactionInstruction[] = [];
+        const uv = await getUserVault(connection, owner);
+        if (!uv.exists) ixs.push(ixInitializeVault(owner));
+
+        const vault = vaultPda(owner);
+        const payoutMint = staked ? MSOL_MINT : WSOL_MINT;
+        const required: Array<{ mint: PublicKey; holder: PublicKey; why: string }> = [
+          { mint: DEVUSDC_MINT, holder: owner, why: "delegated pull source" },
+          { mint: DEVUSDC_MINT, holder: vault, why: "swap input" },
+          { mint: payoutMint, holder: owner, why: "direct settlement destination" },
+        ];
+        for (const { mint, holder } of required) {
+          const addr = ata(mint, holder);
+          if (!(await connection.getAccountInfo(addr))) {
+            ixs.push(createAssociatedTokenAccountIdempotentInstruction(owner, addr, holder, mint));
+          }
+        }
+
+        ixs.push(ixCreateRule({
+          owner, vaultTotalRules: uv.totalRules,
+          trigger: { kind: "TeamWinVerified", teamId, teamStatKey, opponentStatKey },
+          amountUsdc, maxSlippageBps: DEFAULT_MAX_SLIPPAGE_BPS, maxExecutions: DEFAULT_MAX_EXECUTIONS,
+          matchId, matchEndTs,
+          ...(staked ? { actionKind: "SwapStakeAndSave" as const } : {}),
+        }));
+        return submit(ixs, onSent);
+      },
+    );
+    if (sig) await refresh();
+    return sig;
+  }, [address, connection, fixtures, refresh, run]);
+
+  /**
+   * MANUAL FALLBACK for a TeamWinVerified rule: the OWNER settles it themselves.
+   *
+   * Normally the keeper does this and the owner never touches it. If the keeper
+   * is down, late, or disabled, this is the escape hatch — the program does not
+   * care who calls (no signer identity is trusted), so an owner-signed
+   * transaction lands in EXACTLY the same on-chain state as a keeper-signed one.
+   * Same instruction, same accounts, same oracle CPI; only the fee payer differs.
+   *
+   * The proof comes from /api/challenges/win-proof, a server-side TxLINE proxy —
+   * the browser has no TxLINE credentials. That route is NOT trusted: the
+   * program re-pins the payload to this rule (fixture, both stat keys in order,
+   * period 100) and re-verifies it through Txoracle, so a bad response can only
+   * make this transaction revert, never mis-settle. See the route's header.
+   */
+  const settleChallenge = useCallback(async (rule: RuleView) => {
+    if (!address) return null;
+    const owner = new PublicKey(address);
+    const sig = await run("Settling your challenge", async (onSent) => {
+      if (rule.triggerKind !== "TeamWinVerified") {
+        throw new Error("Only auto-settling challenges can be settled this way");
+      }
+      if (rule.teamStatKey == null || rule.opponentStatKey == null) {
+        throw new Error("This challenge has no pinned stat keys");
+      }
+      const res = await fetch(
+        `/api/challenges/win-proof?fixtureId=${rule.matchId}` +
+          `&teamStatKey=${rule.teamStatKey}&opponentStatKey=${rule.opponentStatKey}`,
+      );
+      const body = await res.json();
+      if (!res.ok) throw new Error(body?.error || "could not fetch the match proof");
+
+      // Mapped with the SHARED mapper that encoder-parity pins against the
+      // keeper's encoder — not a bespoke transformation for this path.
+      const payload = statValidationFromApi(body.proof);
+      const ticks = await ticksForBToA(connection);
+      const args = {
+        caller: owner,            // the owner IS the caller here
+        vaultOwner: owner,
+        ruleId: rule.ruleId,
+        payload,
+        tickArray0: ticks.ta0, tickArray1: ticks.ta1, tickArray2: ticks.ta2,
+        whirlpoolOracle: ticks.whirlpoolOracle,
+      };
+      const ix = rule.actionKind === "SwapStakeAndSave"
+        ? ixExecuteRuleStakedVerifiedWin(args)
+        : ixExecuteRuleVerifiedWin(args);
+      return submitV0([ix], onSent);
+    });
+    if (sig) await refresh();
+    return sig;
+  }, [address, connection, refresh, run]);
+
   const createGoalChallenge = useCallback(async (teamId: number, amountStr: string, threshold: number) => {
     // HARD GUARD — see GOALSCORED_CREATION_ENABLED in constants.ts. Enforced here
     // rather than only on the UI chip so that no caller (including the
@@ -550,10 +714,32 @@ export function useFanApp() {
     [fixtures],
   );
 
+  /**
+   * Full-time outcome of a rule's bound fixture, from the backed team's side.
+   * Drives the TeamWinVerified card states.
+   *
+   * A BARE "is the match finished" BOOLEAN IS NOT ENOUGH HERE. A won match stays
+   * "finished" while the keeper is still working, and showing that as Expired
+   * would tell the user their money is never coming when it is seconds away. The
+   * scoreline is what separates "keeper still to run" from "can never fire".
+   *
+   * "drawn" deliberately covers the PENALTY-SHOOTOUT case. The cached score's
+   * winnerId is shootout-aware, but the on-chain predicate uses full-time goal
+   * keys, which exclude shootout goals — so a 1-1 decided on penalties is a draw
+   * to this trigger and can NEVER settle. That is the documented v1 limitation,
+   * and it must surface as Expired rather than as a permanent "waiting".
+   */
+  const winOutcomeFor = useCallback(
+    (matchId: string, teamId: number | null): WinOutcome => {
+      return fullTimeOutcome(fixtures.find((x) => x.fixtureId === Number(matchId)), teamId);
+    },
+    [fixtures],
+  );
+
   return {
     ready, authenticated, login, logout, user, address,
-    sol, usdc, savedSol, savedMsol, savedDcaSol, teams, activeTeams, challenges, teamName, isMatchFinished,
+    sol, usdc, savedSol, savedMsol, savedDcaSol, teams, activeTeams, challenges, teamName, isMatchFinished, winOutcomeFor,
     txState, resetTx, busy, refresh, loadError,
-    createChallenge, createStakeChallenge, createGoalChallenge, cancelChallenge, withdrawSavings, withdrawStakedSavings, claimChallenge, claimStakeChallenge, getDevUsdc,
+    createChallenge, createStakeChallenge, createGoalChallenge, createWinChallenge, settleChallenge, cancelChallenge, withdrawSavings, withdrawStakedSavings, claimChallenge, claimStakeChallenge, getDevUsdc,
   };
 }

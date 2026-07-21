@@ -21,7 +21,16 @@ import { PublicKey } from "@solana/web3.js";
 const ORACLE_SRC = () => path.resolve(process.cwd(), "../oracle-service/src");
 
 interface OracleMods {
-  txline: { getFixtures: () => Promise<any[]>; getFinishedResult: (id: number) => Promise<any | null> };
+  txline: {
+    getFixtures: () => Promise<any[]>;
+    getFinishedResult: (id: number) => Promise<any | null>;
+    // Manual-settle path (see app/src/app/api/challenges/win-proof/route.ts):
+    // the browser cannot reach TxLINE (no creds, and this is the only place the
+    // API token lives), so the proof is fetched here and handed back RAW.
+    getScoresSnapshot: (id: number) => Promise<any[]>;
+    finalFromSnapshot: (events: any[]) => any | null;
+    getStatValidation: (id: number, seq: number, statKeys: number[]) => Promise<any | null>;
+  };
   resolveMod: { resolveWinner: (r: any, k: boolean) => { winningTeamId: number; reason: string } };
   onchain: {
     // web3.js does not resolve from the sibling oracle-service dir on Vercel, so we
