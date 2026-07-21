@@ -21,6 +21,20 @@ export const WSOL_DECIMALS = 9;
 // for knockout matches with margin; adjust per-fixture in the UI if needed.
 export const MATCH_END_BUFFER_SECS = 3 * 60 * 60;
 
+// MIRRORS programs/pocket_fans/src/constants.rs MAX_MATCH_END_TS_HORIZON_SECS.
+// create_rule REJECTS a rule whose match_end_ts is further out than this
+// (InvalidMatchEndTs), so a fixture beyond the horizon cannot be turned into a
+// challenge no matter what the UI offers.
+//
+// The horizon ROLLS FORWARD daily, so a fixture that is creatable today can stop
+// being creatable tomorrow. Without filtering on it, the picker keeps offering a
+// team whose only fixture has drifted out of range and the user gets an opaque
+// on-chain rejection. Observed 2026-07-21: two Friendlies fixtures had 5.0 and
+// 2.0 days of margin left.
+//
+// scripts/horizon-pin-check.ts asserts this stays equal to the Rust constant.
+export const MAX_MATCH_END_TS_HORIZON_SECS = 120 * 24 * 60 * 60;
+
 // Instruction discriminators (copied verbatim from the IDL; each is
 // sha256("global:<name>")[0..8] — re-derived and cross-checked against
 // target/idl/pocket_fans.json, not hand-written).
@@ -129,3 +143,13 @@ export const BROWSER_RPC = "/api/rpc";
 export const LOOKUP_TABLE_ADDRESS = new PublicKey(
   process.env.NEXT_PUBLIC_LOOKUP_TABLE_ADDRESS || "Dm3LvzUA7u9GeMDzD7TTrUKqbPFo7uYVzJMjbWRMy6pf",
 );
+
+// A REAL, already-settled TeamWinVerified challenge on devnet: a permissionless
+// keeper proved the full-time result via the Txoracle CPI and the payout landed
+// in the owner's wallet, with no user interaction. Linked from the UI as
+// evidence the automation genuinely works, which matters when the challenge a
+// visitor just created cannot settle until its match is actually played.
+export const EXAMPLE_SETTLEMENT_TX =
+  "p9fYgNTTRcTcNm1JKvBm1Te2jnk6vzS47xz1SuEbFDwNQTaJzLwYqRKCmgMsXVU25tWQXHUMHzqR2eZryfCtJtj";
+export const EXAMPLE_SETTLEMENT_URL =
+  `https://solscan.io/tx/${EXAMPLE_SETTLEMENT_TX}?cluster=devnet`;

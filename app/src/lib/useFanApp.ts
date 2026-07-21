@@ -21,6 +21,7 @@ import {
 } from "@/lib/constants";
 import {
   vaultPda, ata, ixInitializeVault, ixCreateRule, ixRevokeRule, ixWithdrawFromVault, statKeysForTeam,
+  isFixtureCreatable,
   ixExecuteRuleDirect, ixExecuteRuleStakedDirect, ticksForBToA, getUserVault, getUserRules, tokenUiBalance, RuleView,
   ixWrapSol, ixSyncNative, ixSwapSolToUsdc, ticksForAToB, estimateUsdcOut, estimateWsolOut, fullTimeOutcome,
   ixExecuteRuleVerifiedWin, ixExecuteRuleStakedVerifiedWin, statValidationFromApi,
@@ -42,25 +43,6 @@ interface Fixture {
   // knockout penalty result into winnerId, so a knockout decided on penalties
   // has a non-zero winnerId and a group-stage draw has winnerId 0.
   score?: { p1: number; p2: number; winnerId: number } | null;
-}
-
-// Can a NEW challenge still be created against this fixture?
-//
-// The binding constraint is on-chain, not cosmetic: create_rule requires
-// `match_end_ts > now`, and both create paths derive
-// match_end_ts = kickoff + MATCH_END_BUFFER_SECS. So the real test is whether
-// that derived timestamp is still in the future — NOT whether kickoff is.
-// A LIVE match therefore stays creatable (kickoff passed, match_end_ts hasn't),
-// which is correct: a TeamWin rule created mid-match is claimable after it ends.
-//
-// Status alone is NOT sufficient. A fixture whose status lags reality — stale
-// cache, poller delay, a match that ran long — reads "upcoming" with a kickoff
-// long past. Filtering on status only is what let the picker show teams from
-// week-old matches and let createChallenge build a doomed match_end_ts.
-// Checking both means a status lag can no longer produce an invalid rule.
-function isFixtureCreatable(f: Fixture, nowMs: number): boolean {
-  if (f.status === "finished") return false;
-  return f.startTime + MATCH_END_BUFFER_SECS * 1000 > nowMs;
 }
 
 /**

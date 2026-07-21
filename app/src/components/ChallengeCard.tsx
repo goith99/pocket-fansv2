@@ -1,7 +1,8 @@
-import { Goal, Info, PartyPopper, Coins, Zap, Hourglass } from "lucide-react";
+import { Goal, Info, PartyPopper, Coins, Zap, Hourglass, ExternalLink } from "lucide-react";
 import TeamFlag from "./TeamFlag";
 import type { RuleView } from "@/lib/pf";
 import type { ChallengeNote } from "@/lib/useChallengeNotes";
+import { EXAMPLE_SETTLEMENT_URL } from "@/lib/constants";
 import type { WinOutcome } from "@/lib/useFanApp";
 
 const noteDate = (ms: number) => new Date(ms).toLocaleDateString([], { month: "short", day: "numeric" });
@@ -173,12 +174,27 @@ export default function ChallengeCard({
       {/* TeamWinVerified PENDING: match not played/finished yet. Nothing for the
           owner to do, ever — this is the whole point of the trigger. */}
       {winPending && (
-        <div className="mt-3 flex items-start gap-2 rounded-xl bg-black/[0.03] px-3 py-2.5 text-[13px] leading-relaxed text-muted">
-          <Hourglass size={15} className="mt-0.5 shrink-0 text-faint" />
-          <p>
-            Waiting on {name}&rsquo;s result. If they win, this {isStake ? "stakes" : "saves"} automatically —
-            you won&rsquo;t need to tap anything.
-          </p>
+        <div className="mt-3 rounded-xl bg-black/[0.03] px-3 py-2.5 text-[13px] leading-relaxed text-muted">
+          <div className="flex items-start gap-2">
+            <Hourglass size={15} className="mt-0.5 shrink-0 text-faint" />
+            {/* Deliberately generic about WHEN. Fixture dates come from the data
+                feed and can move or not be played; promising a specific real
+                event on a specific date would be a claim we cannot stand behind. */}
+            <p>
+              Waiting on {name}&rsquo;s result. Once the match finishes, a keeper proves the final score
+              on-chain and this {isStake ? "stakes" : "saves"} automatically — you won&rsquo;t need to tap
+              anything, and you don&rsquo;t need to be online.
+            </p>
+          </div>
+          <a
+            href={EXAMPLE_SETTLEMENT_URL}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-2 inline-flex items-center gap-1 pl-[23px] text-[12px] font-semibold text-accent hover:underline"
+          >
+            See a challenge that already settled this way
+            <ExternalLink size={12} />
+          </a>
         </div>
       )}
 

@@ -1,8 +1,9 @@
 "use client";
 import { useMemo, useState } from "react";
-import { ArrowLeft, Search, Check } from "lucide-react";
+import { ArrowLeft, Search, Check, ExternalLink } from "lucide-react";
 import TeamFlag from "./TeamFlag";
 import type { Team } from "@/lib/useFanApp";
+import { EXAMPLE_SETTLEMENT_URL } from "@/lib/constants";
 
 // Full-screen "pick your side" sheet — a searchable grid of big flag cards,
 // like choosing your team in a fantasy app. Not a <select>.
@@ -51,7 +52,34 @@ export default function TeamPickerSheet({
       </div>
 
       <div className="mx-auto w-full max-w-2xl flex-1 overflow-y-auto px-4 py-4">
-        {filtered.length === 0 && <div className="py-12 text-center text-sm text-muted">No teams match “{q}”.</div>}
+        {/* Two DIFFERENT empty states. "No teams at all" is a data condition
+            (no scheduled fixtures we can build a challenge from) and needs
+            explaining — showing a bare search miss there reads as a broken app,
+            which is exactly what happened when the World Cup ended and the
+            fixture feed drained. */}
+        {teams.length === 0 ? (
+          <div className="mx-auto max-w-sm py-12 text-center">
+            <div className="text-3xl">📅</div>
+            <p className="mt-3 text-sm font-semibold text-ink">No matches scheduled right now</p>
+            <p className="mt-1.5 text-[13px] leading-relaxed text-muted">
+              Challenges are tied to a specific upcoming match, so there&rsquo;s nothing to back at the
+              moment. New fixtures appear here automatically as they&rsquo;re announced.
+            </p>
+            <a
+              href={EXAMPLE_SETTLEMENT_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-3 inline-flex items-center gap-1 text-[13px] font-semibold text-accent hover:underline"
+            >
+              See a challenge that already settled
+              <ExternalLink size={13} />
+            </a>
+          </div>
+        ) : (
+          filtered.length === 0 && (
+            <div className="py-12 text-center text-sm text-muted">No teams match “{q}”.</div>
+          )
+        )}
         <div className="grid grid-cols-3 gap-2.5 sm:grid-cols-4">
           {filtered.map((t) => {
             const selected = value === t.id;

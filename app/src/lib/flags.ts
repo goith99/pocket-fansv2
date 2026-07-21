@@ -31,6 +31,10 @@ const ISO: Record<string, string> = {
   senegal: "sn", serbia: "rs", slovakia: "sk", slovenia: "si", "south africa": "za",
   "south korea": "kr", spain: "es", sweden: "se", switzerland: "ch", tunisia: "tn",
   turkey: "tr", ukraine: "ua", uruguay: "uy", usa: "us", venezuela: "ve", wales: "gb-wls",
+  // Nations reached beyond the World Cup set, once the poller widened to every
+  // entitled competition (friendlies etc.). Without these they render as bare
+  // initials next to real flags, which looks broken rather than deliberate.
+  azerbaijan: "az", gibraltar: "gi", india: "in", liechtenstein: "li", tajikistan: "tj",
 };
 
 // alias (normalised) → canonical name, for TxLINE's spelling variants
@@ -58,6 +62,9 @@ export const TEAM_BY_ID: Record<number, string> = {
   1867: "Egypt", 1888: "England", 1999: "France", 2530: "Morocco",
   2545: "Mexico", 2661: "Norway", 2802: "Portugal", 3021: "Spain",
   3099: "Switzerland", 3220: "USA",
+  // Friendlies participants (TxLINE competition 430), captured 2026-07-21.
+  1144: "India", 1225: "New Zealand", 1341: "Tajikistan", 1519: "Australia",
+  1530: "Azerbaijan", 2431: "Liechtenstein", 45856: "Gibraltar",
 };
 
 /** Two-letter fallback shown when a nation isn't in the flag map. */

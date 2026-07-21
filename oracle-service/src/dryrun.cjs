@@ -64,7 +64,7 @@ async function main() {
   log.info('================ POCKET FANS ORACLE — DRY RUN ================');
   log.info(`NO signer loaded, NO transaction will be sent. dryRun=${config.dryRun}`);
   log.info(`rpc=${config.rpcUrl.replace(/\/v2\/.*/, '/v2/***')} program=${config.programId}`);
-  log.info(`txline=${config.apiOrigin} competition=${config.competitionId}`);
+  log.info(`txline=${config.apiOrigin} competition=${config.competitionId ?? 'ALL entitled'}`);
   if (!config.apiToken) throw new Error('TXLINE_API_TOKEN not set (checked oracle-service/.env then shroudline/.env)');
 
   const conn = new Connection(config.rpcUrl, 'confirmed');

@@ -42,7 +42,21 @@ const config = {
   // --- TxLINE API ---
   apiOrigin: process.env.TXLINE_API_ORIGIN || 'https://txline-dev.txodds.com',
   apiToken: process.env.TXLINE_API_TOKEN, // required; checked at startup with a clear error
-  competitionId: num('COMPETITION_ID', 72), // World Cup
+  // OPTIONAL NARROWING override. Unset (the default) = pull EVERY competition
+  // our API token is entitled to.
+  //
+  // This used to default to 72 (World Cup 2026). When that tournament finished,
+  // /api/fixtures/snapshot?competitionId=72 started returning 0 fixtures, so
+  // fixtures_cache drained of upcoming matches and the app's team picker went
+  // permanently empty — the product looked broken while the API still had
+  // fixtures we were entitled to (competition 430, "Friendlies").
+  //
+  // `competitionId` on /api/fixtures/snapshot is documented as OPTIONAL, and
+  // omitting it returns the full entitlement. Defaulting to "everything" means
+  // the poller keeps working across tournament boundaries and picks up any
+  // competition added to our subscription later, with no code change. Set
+  // COMPETITION_ID only to deliberately narrow.
+  competitionId: process.env.COMPETITION_ID ? Number(process.env.COMPETITION_ID) : null,
 
   // --- fixture windows (hours relative to StartTime) ---
   finalizeAfterH: num('FINALIZE_AFTER_H', 3), // consider a fixture finalizable this long after kickoff

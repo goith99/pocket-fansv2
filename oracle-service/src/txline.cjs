@@ -47,8 +47,12 @@ async function headers() {
 // Forward-looking fixtures for the competition. NOTE: finished fixtures drop off
 // this snapshot — that's why we persist ids / allow PROBE_FIXTURE_IDS.
 async function getFixtures() {
+  // No competitionId => every competition this token is entitled to. See the
+  // config comment: hardcoding one competition is what emptied the app when the
+  // World Cup ended.
+  const qs = config.competitionId ? `?competitionId=${config.competitionId}` : '';
   const f = timedFetch(
-    `${config.apiOrigin}/api/fixtures/snapshot?competitionId=${config.competitionId}`,
+    `${config.apiOrigin}/api/fixtures/snapshot${qs}`,
     { headers: await headers() },
   );
   let res;

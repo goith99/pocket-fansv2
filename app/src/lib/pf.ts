@@ -9,6 +9,7 @@ import {
   PROGRAM_ID, DEVUSDC_MINT, WSOL_MINT, TOKEN_PROGRAM, SYSTEM_PROGRAM,
   WHIRLPOOL, WHIRLPOOL_PROGRAM, WHIRLPOOL_VAULT_A, WHIRLPOOL_VAULT_B,
   DISC, ACCT_DISC, MIN_SQRT_PRICE, TXORACLE_PROGRAM,
+  MATCH_END_BUFFER_SECS, MAX_MATCH_END_TS_HORIZON_SECS,
   MSOL_MINT, MARINADE_PROGRAM, MARINADE_STATE, MARINADE_MSOL_MINT_AUTHORITY,
   MARINADE_RESERVE, MARINADE_LIQ_POOL_SOL_LEG, MARINADE_LIQ_POOL_MSOL_LEG,
   MARINADE_LIQ_POOL_MSOL_LEG_AUTHORITY,
@@ -59,6 +60,41 @@ export function encodeTrigger(t: RuleTrigger): Buffer {
     case "TeamWinVerified":
       return Buffer.concat([u8(2), u32(t.teamId), u32(t.teamStatKey), u32(t.opponentStatKey)]);
   }
+}
+
+// Can a NEW challenge still be created against this fixture?
+//
+// The binding constraint is on-chain, not cosmetic: create_rule requires
+// `match_end_ts > now`, and both create paths derive
+// match_end_ts = kickoff + MATCH_END_BUFFER_SECS. So the real test is whether
+// that derived timestamp is still in the future — NOT whether kickoff is.
+// A LIVE match therefore stays creatable (kickoff passed, match_end_ts hasn't),
+// which is correct: a TeamWin rule created mid-match is claimable after it ends.
+//
+// Status alone is NOT sufficient. A fixture whose status lags reality — stale
+// cache, poller delay, a match that ran long — reads "upcoming" with a kickoff
+// long past. Filtering on status only is what let the picker show teams from
+// week-old matches and let createChallenge build a doomed match_end_ts.
+// Checking both means a status lag can no longer produce an invalid rule.
+export interface CreatableFixture {
+  status: "upcoming" | "live" | "finished";
+  startTime: number; // ms, TxLINE StartTime
+}
+
+export function isFixtureCreatable(f: CreatableFixture, nowMs: number): boolean {
+  if (f.status === "finished") return false;
+  // Derive match_end_ts EXACTLY as the create functions do, then apply BOTH of
+  // create_rule's guards against it, rather than approximating with a buffer:
+  //     require!(match_end_ts > now)
+  //     require!(match_end_ts <= now + MAX_MATCH_END_TS_HORIZON_SECS)
+  // Mirroring the program's own math means this never needs retuning when the
+  // buffer or the horizon changes — only the constants move.
+  const matchEndTs = Math.floor(f.startTime / 1000) + MATCH_END_BUFFER_SECS;
+  const nowSecs = Math.floor(nowMs / 1000);
+  if (matchEndTs <= nowSecs) return false; // already past — nothing to schedule
+  // Too far out: create_rule would reject with InvalidMatchEndTs. The horizon
+  // rolls forward daily, so this genuinely changes from one day to the next.
+  return matchEndTs <= nowSecs + MAX_MATCH_END_TS_HORIZON_SECS;
 }
 
 /**
